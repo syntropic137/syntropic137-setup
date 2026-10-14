@@ -46,7 +46,7 @@ npx @syntropic137/setup init [options]
 After initial setup, manage your stack with:
 
 ```sh
-npx @syntropic137/setup status       # Container health (docker compose ps)
+npx @syntropic137/setup status       # Container health (docker compose ps) and agent skills state
 npx @syntropic137/setup stop         # Stop the stack
 npx @syntropic137/setup start        # Start the stack
 npx @syntropic137/setup logs         # Tail container logs
