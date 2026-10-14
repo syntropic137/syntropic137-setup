@@ -131,6 +131,23 @@ describe("parseArgs", () => {
     exit.mockRestore();
   });
 
+  it("parses reset flags, including --dir=value", () => {
+    const o = parseArgs(["node", "cli", "reset", "--dir=/srv/syn", "--no-backup", "--all", "--yes"]);
+    expect(o).toMatchObject({ command: "reset", dir: "/srv/syn", noBackup: true, images: true, cli: true, skills: true, yes: true });
+    expect(parseArgs(["node", "cli", "reset", "--dir", "/srv/syn"]).dir).toBe("/srv/syn");
+  });
+
+  it("refuses a reset with a missing --dir value or an unknown argument", () => {
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`exit ${code}`);
+    }) as never);
+    expect(() => parseArgs(["node", "cli", "reset", "--yes", "--dir"])).toThrow("exit 1");
+    expect(() => parseArgs(["node", "cli", "reset", "--dir", "--yes"])).toThrow("exit 1");
+    expect(() => parseArgs(["node", "cli", "reset", "--dri", "/x", "--yes"])).toThrow("exit 1");
+    expect(() => parseArgs(["node", "cli", "reset", "everything"])).toThrow("exit 1");
+    exit.mockRestore();
+  });
+
   it("parses --yes and -y", () => {
     expect(parseArgs(["node", "cli", "skills", "--yes"]).yes).toBe(true);
     expect(parseArgs(["node", "cli", "skills", "install", "-y"]).yes).toBe(true);

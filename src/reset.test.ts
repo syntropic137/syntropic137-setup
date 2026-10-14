@@ -20,6 +20,7 @@ import {
   backupDirFor,
   describePlan,
   executeReset,
+  executionBlocker,
   githubAppSettingsUrl,
   parseComposeProjectName,
   parseNpmGlobalVersion,
@@ -75,7 +76,10 @@ beforeEach(() => {
   installDir = path.join(home, ".syntropic137");
   fs.mkdirSync(path.join(installDir, "secrets"), { recursive: true });
   fs.writeFileSync(path.join(installDir, COMPOSE_FILE), `services: {}\nname: ${SELFHOST_COMPOSE_PROJECT}\n`);
-  fs.writeFileSync(path.join(installDir, ".env"), "SYN_GITHUB_APP_NAME=my-app\nSYN_GITHUB_APP_ORG=acme\n");
+  fs.writeFileSync(
+    path.join(installDir, ".env"),
+    "APP_ENVIRONMENT=selfhost\nSYN_VERSION=1.0.0\nSYN_GITHUB_APP_NAME=my-app\nSYN_GITHUB_APP_ORG=acme\n",
+  );
   fs.writeFileSync(path.join(installDir, "secrets", "db-password.secret"), "x");
 });
 
@@ -99,24 +103,36 @@ const probe = (run: SyncRunner, skills: string[] | null = ["syn-workflow"]): Res
   now: NOW,
 });
 
+const OURS = { composeProject: SELFHOST_COMPOSE_PROJECT, selfhostEnv: true };
+const NONE = { composeProject: "", selfhostEnv: false };
+
 describe("scope refusals", () => {
   it("refuses the filesystem root", () => {
-    expect(() => assertResettableDir("/", home, true, [COMPOSE_FILE])).toThrow(ResetRefusal);
+    expect(() => assertResettableDir("/", home, true, OURS)).toThrow(ResetRefusal);
   });
 
   it("refuses the home directory and its parents", () => {
-    expect(() => assertResettableDir(home, home, true, [COMPOSE_FILE, ".env"])).toThrow(/home directory/);
-    expect(() => assertResettableDir(root, home, true, [COMPOSE_FILE])).toThrow(/home directory/);
+    expect(() => assertResettableDir(home, home, true, OURS)).toThrow(/home directory/);
+    expect(() => assertResettableDir(root, home, true, OURS)).toThrow(/home directory/);
   });
 
-  it("refuses an existing dir that is not an install", () => {
-    expect(() => assertResettableDir(installDir, home, true, ["notes.txt"])).toThrow(/does not look like/);
+  it("refuses an existing dir without Syntropic137 evidence", () => {
+    expect(() => assertResettableDir(installDir, home, true, NONE)).toThrow(/does not look like/);
   });
 
-  it("accepts an install dir, and a missing one", () => {
-    expect(() => assertResettableDir(installDir, home, true, [COMPOSE_FILE])).not.toThrow();
-    expect(() => assertResettableDir(installDir, home, true, [".env"])).not.toThrow();
-    expect(() => assertResettableDir(installDir, home, false, [])).not.toThrow();
+  it("accepts our compose file, the selfhost .env, or a missing dir", () => {
+    expect(() => assertResettableDir(installDir, home, true, { composeProject: SELFHOST_COMPOSE_PROJECT, selfhostEnv: false })).not.toThrow();
+    expect(() => assertResettableDir(installDir, home, true, { composeProject: "", selfhostEnv: true })).not.toThrow();
+    expect(() => assertResettableDir(installDir, home, false, NONE)).not.toThrow();
+  });
+
+  it("refuses an unrelated project that merely has a .env", async () => {
+    const project = path.join(home, "code", "my-app");
+    fs.mkdirSync(project, { recursive: true });
+    fs.writeFileSync(path.join(project, ".env"), "DATABASE_URL=postgres://x\n");
+    const { run, calls } = fakeDocker();
+    await expect(planReset(opts({ installDir: project }), probe(run))).rejects.toThrow(/does not look like/);
+    expect(calls).toHaveLength(0);
   });
 
   it("refuses an install whose compose file names another project", async () => {
@@ -131,6 +147,24 @@ describe("scope refusals", () => {
     fs.writeFileSync(file, "x");
     await expect(planReset(opts({ installDir: file }), probe(fakeDocker().run))).rejects.toThrow(/not a directory/);
   });
+
+  it("refuses a symlinked install dir", async () => {
+    const link = path.join(home, "link-to-install");
+    fs.symlinkSync(installDir, link);
+    await expect(planReset(opts({ installDir: link }), probe(fakeDocker().run))).rejects.toThrow(/symlink/);
+  });
+
+  it("sees through a symlinked parent that points at home", async () => {
+    // elsewhere/h -> home, so elsewhere/h/.. is home's parent: refuse.
+    const elsewhere = path.join(root, "elsewhere");
+    fs.mkdirSync(elsewhere);
+    fs.symlinkSync(home, path.join(elsewhere, "h"));
+    fs.writeFileSync(path.join(home, COMPOSE_FILE), `name: ${SELFHOST_COMPOSE_PROJECT}\n`);
+    await expect(planReset(opts({ installDir: path.join(elsewhere, "h") }), probe(fakeDocker().run))).rejects.toThrow(/symlink/);
+    const viaParent = path.join(elsewhere, "h", ".syntropic137");
+    const plan = await planReset(opts({ installDir: viaParent }), probe(fakeDocker().run));
+    expect(plan.installDir).toBe(fs.realpathSync(installDir));
+  });
 });
 
 describe("target selection", () => {
@@ -144,6 +178,7 @@ describe("target selection", () => {
       networks: ["syntropic137_selfhost_default"],
     });
     const listing = calls.filter((c) => c.cmd === "docker" && c.args[0] !== "info");
+    expect(listing.length).toBe(3);
     expect(listing.every((c) => c.args.includes(LABEL))).toBe(true);
   });
 
@@ -174,16 +209,23 @@ describe("target selection", () => {
 
   it("backs up to a timestamped sibling by default, deletes with --no-backup", async () => {
     const withBackup = await planReset(opts(), probe(fakeDocker().run));
-    expect(withBackup.backupDir).toBe(`${installDir}.backup-20261014-090507`);
+    expect(withBackup.backupDir).toBe(`${fs.realpathSync(installDir)}.backup-20261014-090507`);
     const noBackup = await planReset(opts({ backup: false }), probe(fakeDocker().run));
     expect(noBackup.backupDir).toBeNull();
   });
 
-  it("notes when Docker is unavailable instead of failing", async () => {
+  it("notes when Docker is unavailable, and blocks execution", async () => {
     const plan = await planReset(opts({ images: true }), probe(fakeDocker({ docker: false }).run));
     expect(plan.compose).toBeNull();
     expect(plan.images).toEqual([]);
     expect(plan.notes.join(" ")).toMatch(/Docker is not running/);
+    expect(executionBlocker(plan)).toMatch(/Start Docker/);
+  });
+
+  it("refuses when a Docker listing fails rather than treating it as empty", async () => {
+    const { run: base } = fakeDocker();
+    const run: SyncRunner = (cmd, args, cwd) => (args[0] === "volume" ? bad("permission denied") : base(cmd, args, cwd));
+    await expect(planReset(opts(), probe(run))).rejects.toThrow(/Could not list Docker volumes/);
   });
 
   it("reads the GitHub App from .env for the note", async () => {
@@ -204,7 +246,7 @@ describe("dry-run output", () => {
 
     const groups = describePlan(plan);
     expect(groups.map((g) => g.section)).toEqual([
-      `Docker compose project "${SELFHOST_COMPOSE_PROJECT}" (docker compose down -v)`,
+      `Docker resources of compose project "${SELFHOST_COMPOSE_PROJECT}"`,
       "Images (ghcr.io/syntropic137/*)",
       "Install directory",
     ]);
@@ -213,27 +255,54 @@ describe("dry-run output", () => {
 
     // Planning ran only read-only commands and left the install in place.
     const mutating = calls.filter((c) => ["down", "rm", "uninstall"].some((v) => c.args.includes(v)));
+    expect(executionBlocker(plan)).toBeNull();
     expect(mutating).toHaveLength(0);
     expect(fs.existsSync(installDir)).toBe(true);
   });
 });
 
 describe("executeReset", () => {
-  it("runs compose down with the project and file, then backs up with chmod 700", async () => {
-    const { run, calls } = fakeDocker({ containers: ["syn137-api"], volumes: ["v1"] });
+  it("backs up first (chmod 700), then removes only labelled resources by name", async () => {
+    const { run, calls } = fakeDocker({ containers: ["syn137-api"], volumes: ["syn137_db_data"], networks: ["syn137_internal"] });
     const plan = await planReset(opts(), probe(run));
+    const before = calls.length;
     const results = await executeReset(plan, { run, removeSkills: vi.fn() });
     expect(results.every((r) => r.ok)).toBe(true);
+    expect(results[0]!.step).toMatch(/^backup/);
 
-    const down = calls.find((c) => c.args.includes("down"));
-    expect(down?.args).toEqual([
-      "compose", "-p", SELFHOST_COMPOSE_PROJECT, "-f", path.join(installDir, COMPOSE_FILE),
-      "down", "-v", "--remove-orphans",
+    const exec = calls.slice(before).filter((c) => c.args.includes("rm"));
+    expect(exec.map((c) => c.args)).toEqual([
+      ["rm", "-f", "-v", "syn137-api"],
+      ["network", "rm", "syn137_internal"],
+      ["volume", "rm", "syn137_db_data"],
     ]);
+    expect(calls.some((c) => c.args.includes("down"))).toBe(false);
     expect(fs.existsSync(installDir)).toBe(false);
     const backup = plan.backupDir!;
     expect(fs.statSync(backup).mode & 0o777).toBe(0o700);
     expect(fs.readFileSync(path.join(backup, "secrets", "db-password.secret"), "utf-8")).toBe("x");
+  });
+
+  it("aborts before touching Docker when the backup cannot be made", async () => {
+    const { run, calls } = fakeDocker({ containers: ["c"], volumes: ["v"] });
+    const plan = await planReset(opts(), probe(run));
+    fs.mkdirSync(plan.backupDir!);
+    const before = calls.length;
+    const results = await executeReset(plan, { run, removeSkills: vi.fn() });
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({ ok: false });
+    expect(calls.slice(before)).toHaveLength(0);
+    expect(fs.existsSync(installDir)).toBe(true);
+  });
+
+  it("keeps the install dir when Docker cleanup fails under --no-backup", async () => {
+    const { run: base } = fakeDocker({ containers: ["c"] });
+    const run: SyncRunner = (cmd, args, cwd) => (args[0] === "rm" ? bad("container busy") : base(cmd, args, cwd));
+    const plan = await planReset(opts({ backup: false }), probe(run));
+    const results = await executeReset(plan, { run, removeSkills: vi.fn() });
+    expect(results.find((r) => r.step === "remove containers")).toMatchObject({ ok: false, detail: "container busy" });
+    expect(results.find((r) => r.step.startsWith("delete"))).toMatchObject({ ok: false });
+    expect(fs.existsSync(installDir)).toBe(true);
   });
 
   it("deletes the install dir with --no-backup", async () => {
@@ -253,15 +322,6 @@ describe("executeReset", () => {
     expect(calls.some((c) => c.args[0] === "image" && c.args[1] === "rm")).toBe(true);
     expect(calls.some((c) => c.cmd === "npm" && c.args.join(" ") === "uninstall -g @syntropic137/cli")).toBe(true);
     expect(removeSkills).toHaveBeenCalledWith(["syn-workflow"]);
-  });
-
-  it("reports a failed step and carries on", async () => {
-    const { run: base } = fakeDocker({ containers: ["c"] });
-    const run: SyncRunner = (cmd, args, cwd) => (args.includes("down") ? bad("compose exploded") : base(cmd, args, cwd));
-    const plan = await planReset(opts(), probe(run));
-    const results = await executeReset(plan, { run, removeSkills: vi.fn() });
-    expect(results[0]).toMatchObject({ ok: false, detail: "compose exploded" });
-    expect(results.some((r) => r.step.startsWith("backup") && r.ok)).toBe(true);
   });
 });
 

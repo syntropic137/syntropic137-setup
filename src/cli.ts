@@ -57,6 +57,7 @@ import {
   ResetRefusal,
   defaultSyncRunner,
   executeReset,
+  executionBlocker,
   planReset,
   printGithubAppNote,
   printPlan,
@@ -585,6 +586,13 @@ export class CLI {
     }
 
     printPlan(plan, execute);
+    const blocker = execute ? executionBlocker(plan) : null;
+    if (blocker) {
+      console.log();
+      fail(blocker);
+      info("Nothing was removed.");
+      process.exit(1);
+    }
     if (!execute) {
       printGithubAppNote(plan);
       console.log();
@@ -1127,17 +1135,39 @@ export class CLI {
       if (action !== undefined && isAction(action)) opts.skillsAction = action;
     }
 
-    for (let i = 0; i < args.length; i++) {
-      const arg = args[i]!;
+    // `--flag=value` is the same as `--flag value`.
+    const flags = args.flatMap((a) => {
+      const eq = a.indexOf("=");
+      return a.startsWith("--") && eq > 0 && CLI.VALUE_FLAGS.has(a.slice(0, eq)) ? [a.slice(0, eq), a.slice(eq + 1)] : [a];
+    });
+    const valueOf = (i: number, flag: string): string => {
+      const v = flags[i];
+      if (v === undefined || v === "" || v.startsWith("-")) {
+        fail(`${flag} needs a value.`);
+        process.exit(1);
+      }
+      return v;
+    };
+    // reset is destructive: an argument it does not understand is an error,
+    // never something to ignore.
+    const RESET_FLAGS = new Set(["--dir", "--yes", "-y", "--no-backup", "--images", "--cli", "--skills", "--all"]);
+
+    for (let i = 0; i < flags.length; i++) {
+      const arg = flags[i]!;
+      if (command === "reset" && i > 0 && !RESET_FLAGS.has(arg)) {
+        fail(`Unknown reset argument: ${arg}`);
+        info(`Usage: ${CMD.reset} [--yes] [--no-backup] [--images] [--cli] [--skills] [--all] [--dir <path>]`);
+        process.exit(1);
+      }
       switch (arg) {
         case "--org":
-          opts.org = args[++i];
+          opts.org = valueOf(++i, arg);
           break;
         case "--name":
-          opts.name = args[++i];
+          opts.name = valueOf(++i, arg);
           break;
         case "--dir":
-          opts.dir = args[++i];
+          opts.dir = valueOf(++i, arg);
           break;
         case "--skip-github":
           opts.skipGithub = true;
@@ -1146,7 +1176,7 @@ export class CLI {
           opts.skipDocker = true;
           break;
         case "--webhook-url":
-          opts.webhookUrl = args[++i];
+          opts.webhookUrl = valueOf(++i, arg);
           break;
         case "--yes":
         case "-y":

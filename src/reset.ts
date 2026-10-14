@@ -5,7 +5,9 @@
  * Safe by construction:
  *   - planning is separate from execution, and the CLI only executes with --yes
  *   - the install dir must look like an install, and is never $HOME or /
- *   - Docker resources are selected by the selfhost compose project label only
+ *   - Docker resources are selected by the selfhost compose project label only,
+ *     and removed by name from that label query (never `compose down`, which
+ *     can reach volumes outside the project by explicit name)
  *   - the install dir is backed up (chmod 700) unless --no-backup
  *   - the GitHub App on github.com is never touched
  *
@@ -53,8 +55,6 @@ export interface ResetProbe {
 
 export interface ComposeTargets {
   project: string;
-  /** Compose file to pass with -f, when the install still has one. */
-  composeFile: string | null;
   containers: string[];
   volumes: string[];
   networks: string[];
@@ -84,12 +84,21 @@ export class ResetRefusal extends Error {}
 // Scope checks (pure)
 // ---------------------------------------------------------------------------
 
+/** What the install dir contains that marks it as a Syntropic137 install. */
+export interface InstallEvidence {
+  /** `name:` declared by the compose file, "" if the file is absent, null if it has none. */
+  composeProject: string | null;
+  /** .env written by `init`: APP_ENVIRONMENT=selfhost and SYN_VERSION set. */
+  selfhostEnv: boolean;
+}
+
 /**
  * Refuse any install dir we cannot be sure is ours: the filesystem root, the
- * home directory or anything above it, and an existing directory that holds
- * neither the compose file nor a .env.
+ * home directory or anything above it, and an existing directory without
+ * Syntropic137-specific evidence (our compose file, or the .env `init` writes).
+ * Paths must already be canonical (symlinks resolved).
  */
-export function assertResettableDir(installDir: string, homedir: string, exists: boolean, entries: readonly string[]): void {
+export function assertResettableDir(installDir: string, homedir: string, exists: boolean, evidence: InstallEvidence): void {
   const dir = path.resolve(installDir);
   const home = path.resolve(homedir);
   if (dir === path.parse(dir).root) {
@@ -98,10 +107,56 @@ export function assertResettableDir(installDir: string, homedir: string, exists:
   if (dir === home || home.startsWith(dir + path.sep)) {
     throw new ResetRefusal(`Refusing to reset ${dir}: it is your home directory or contains it.`);
   }
-  if (exists && !entries.includes(COMPOSE_FILE) && !entries.includes(".env")) {
+  if (!exists) return;
+  if (evidence.composeProject !== "" && evidence.composeProject !== SELFHOST_COMPOSE_PROJECT) {
     throw new ResetRefusal(
-      `Refusing to reset ${dir}: it has no ${COMPOSE_FILE} or .env, so it does not look like a Syntropic137 install.`,
+      `Refusing to reset: ${path.join(dir, COMPOSE_FILE)} declares compose project ` +
+        `"${evidence.composeProject ?? "(none)"}", not "${SELFHOST_COMPOSE_PROJECT}".`,
     );
+  }
+  if (evidence.composeProject !== SELFHOST_COMPOSE_PROJECT && !evidence.selfhostEnv) {
+    throw new ResetRefusal(
+      `Refusing to reset ${dir}: it has neither the Syntropic137 ${COMPOSE_FILE} nor a selfhost .env, ` +
+        "so it does not look like a Syntropic137 install.",
+    );
+  }
+}
+
+/** Is this the .env `init` writes? */
+export function isSelfhostEnv(env: Record<string, string>): boolean {
+  return env.APP_ENVIRONMENT === "selfhost" && Boolean(env.SYN_VERSION);
+}
+
+/** Canonical path: symlinks in the parents resolved; the target itself must not be a symlink. */
+export function canonicalInstallDir(installDir: string): { dir: string; exists: boolean } {
+  const lexical = path.resolve(installDir);
+  let st: fs.Stats | null = null;
+  try {
+    st = fs.lstatSync(lexical);
+  } catch {
+    st = null;
+  }
+  if (st?.isSymbolicLink()) {
+    throw new ResetRefusal(`Refusing to reset ${lexical}: it is a symlink. Pass the real directory with --dir.`);
+  }
+  if (st && !st.isDirectory()) {
+    throw new ResetRefusal(`Refusing to reset ${lexical}: it is not a directory.`);
+  }
+  // Resolve the nearest existing ancestor, so a symlinked parent cannot hide $HOME.
+  let base = lexical;
+  const rest: string[] = [];
+  while (!fs.existsSync(base) && path.dirname(base) !== base) {
+    rest.unshift(path.basename(base));
+    base = path.dirname(base);
+  }
+  return { dir: path.join(fs.realpathSync(base), ...rest), exists: st !== null };
+}
+
+function canonicalHome(homedir: string): string {
+  try {
+    return fs.realpathSync(homedir);
+  } catch {
+    return path.resolve(homedir);
   }
 }
 
@@ -152,43 +207,36 @@ const projectLabel = (project: string) => `label=com.docker.compose.project=${pr
 // ---------------------------------------------------------------------------
 
 export async function planReset(opts: ResetOptions, probe: ResetProbe): Promise<ResetPlan> {
-  const installDir = path.resolve(opts.installDir);
-  const exists = fs.existsSync(installDir);
-  if (exists && !fs.statSync(installDir).isDirectory()) {
-    throw new ResetRefusal(`Refusing to reset ${installDir}: it is not a directory.`);
-  }
-  const entries = exists ? fs.readdirSync(installDir) : [];
-  assertResettableDir(installDir, probe.homedir, exists, entries);
+  const { dir: installDir, exists } = canonicalInstallDir(opts.installDir);
+  const home = canonicalHome(probe.homedir);
+
+  const composePath = path.join(installDir, COMPOSE_FILE);
+  const envPath = path.join(installDir, ".env");
+  const env = exists && fs.existsSync(envPath) ? parseEnv(fs.readFileSync(envPath, "utf-8")) : {};
+  const evidence: InstallEvidence = {
+    composeProject: exists && fs.existsSync(composePath)
+      ? parseComposeProjectName(fs.readFileSync(composePath, "utf-8"))
+      : "",
+    selfhostEnv: isSelfhostEnv(env),
+  };
+  assertResettableDir(installDir, home, exists, evidence);
 
   const notes: string[] = [];
 
-  // Compose project: only ever the selfhost project, and only if the
-  // installed compose file agrees on the name.
-  const composePath = path.join(installDir, COMPOSE_FILE);
-  const hasCompose = exists && fs.existsSync(composePath);
-  if (hasCompose) {
-    const declared = parseComposeProjectName(fs.readFileSync(composePath, "utf-8"));
-    if (declared !== SELFHOST_COMPOSE_PROJECT) {
-      throw new ResetRefusal(
-        `Refusing to reset: ${composePath} declares compose project "${declared ?? "(none)"}", ` +
-          `not "${SELFHOST_COMPOSE_PROJECT}". Reset only removes the Syntropic137 selfhost project.`,
-      );
-    }
-  }
-
+  // Docker resources: only what carries the selfhost project label.
   let compose: ComposeTargets | null = null;
   if (probe.run("docker", ["info"]).ok) {
     const project = SELFHOST_COMPOSE_PROJECT;
-    const ls = (args: string[]) => {
+    const ls = (what: string, args: string[]) => {
       const r = probe.run("docker", args);
-      return r.ok ? lines(r.stdout) : [];
+      if (!r.ok) throw new ResetRefusal(`Could not list Docker ${what}: ${(r.stderr || r.error || "").trim()}`);
+      return lines(r.stdout);
     };
     compose = {
       project,
-      composeFile: hasCompose ? composePath : null,
-      containers: ls(["ps", "-a", "--filter", projectLabel(project), "--format", "{{.Names}}"]),
-      volumes: ls(["volume", "ls", "--filter", projectLabel(project), "--format", "{{.Name}}"]),
-      networks: ls(["network", "ls", "--filter", projectLabel(project), "--format", "{{.Name}}"]),
+      containers: ls("containers", ["ps", "-a", "--filter", projectLabel(project), "--format", "{{.Names}}"]),
+      volumes: ls("volumes", ["volume", "ls", "--filter", projectLabel(project), "--format", "{{.Name}}"]),
+      networks: ls("networks", ["network", "ls", "--filter", projectLabel(project), "--format", "{{.Name}}"]),
     };
   } else {
     notes.push("Docker is not running or not installed: containers, volumes and images were not checked.");
@@ -198,7 +246,8 @@ export async function planReset(opts: ResetOptions, probe: ResetProbe): Promise<
   if (opts.images) {
     if (compose) {
       const r = probe.run("docker", ["image", "ls", "--format", "{{.Repository}}\t{{.Tag}}\t{{.Digest}}\t{{.ID}}"]);
-      images = r.ok ? parseSyntropicImages(r.stdout) : [];
+      if (!r.ok) throw new ResetRefusal(`Could not list Docker images: ${(r.stderr || r.error || "").trim()}`);
+      images = parseSyntropicImages(r.stdout);
     } else {
       images = [];
     }
@@ -217,9 +266,7 @@ export async function planReset(opts: ResetOptions, probe: ResetProbe): Promise<
   }
 
   let githubApp: ResetPlan["githubApp"] = null;
-  const envPath = path.join(installDir, ".env");
-  if (exists && fs.existsSync(envPath)) {
-    const env = parseEnv(fs.readFileSync(envPath, "utf-8"));
+  {
     const slug = env.SYN_GITHUB_APP_NAME;
     const org = env.SYN_GITHUB_APP_ORG;
     if (slug && GITHUB_SLUG_RE.test(slug)) {
@@ -260,7 +307,7 @@ export function describePlan(plan: ResetPlan): PlanLine[] {
       ...c.volumes.map((n) => `volume ${n}`),
       ...c.networks.map((n) => `network ${n}`),
     ];
-    if (items.length > 0) out.push({ section: `Docker compose project "${c.project}" (docker compose down -v)`, items });
+    if (items.length > 0) out.push({ section: `Docker resources of compose project "${c.project}"`, items });
   }
   if (plan.images && plan.images.length > 0) {
     out.push({ section: "Images (ghcr.io/syntropic137/*)", items: plan.images });
@@ -299,59 +346,92 @@ export interface ResetExecDeps {
   removeSkills: (names: string[]) => Promise<CommandResult>;
 }
 
+/** Why execution must not start, or null. Checked by the CLI before --yes runs. */
+export function executionBlocker(plan: ResetPlan): string | null {
+  if (!plan.compose && plan.installDirExists) {
+    return "Docker is not running. Start Docker so reset can remove the stack's containers and volumes first.";
+  }
+  return null;
+}
+
 export async function executeReset(plan: ResetPlan, deps: ResetExecDeps): Promise<ResetStepResult[]> {
   const results: ResetStepResult[] = [];
-  const record = (step: string, r: CommandResult) =>
+  const record = (step: string, r: CommandResult) => {
     results.push({ step, ok: r.ok, detail: r.ok ? undefined : (r.stderr.trim() || r.error) });
+    return r.ok;
+  };
 
-  // 1. Compose project down, while the compose file is still in place.
-  if (plan.compose) {
-    const c = plan.compose;
-    const hasAny = c.containers.length + c.volumes.length + c.networks.length > 0;
-    if (hasAny) {
-      const args = ["compose", "-p", c.project];
-      if (c.composeFile) args.push("-f", c.composeFile);
-      args.push("down", "-v", "--remove-orphans");
-      record("docker compose down -v", deps.run("docker", args, c.composeFile ? plan.installDir : undefined));
-      // Volumes compose did not know about (no file) still carry our project label.
-      const left = deps.run("docker", ["volume", "ls", "--filter", projectLabel(c.project), "--format", "{{.Name}}"]);
-      const remaining = left.ok ? lines(left.stdout) : [];
-      if (remaining.length > 0) record("docker volume rm", deps.run("docker", ["volume", "rm", ...remaining]));
+  // The install dir must still be the directory we planned for.
+  if (plan.installDirExists) {
+    const now = canonicalInstallDir(plan.installDir);
+    if (!now.exists || now.dir !== plan.installDir) {
+      results.push({ step: `check ${plan.installDir}`, ok: false, detail: "changed since the plan was made" });
+      return results;
     }
   }
 
-  // 2. Images.
+  // 1. Secure the backup before anything irreversible. Abort if it fails.
+  if (plan.installDirExists && plan.backupDir) {
+    try {
+      if (fs.existsSync(plan.backupDir)) throw new Error(`${plan.backupDir} already exists`);
+      fs.renameSync(plan.installDir, plan.backupDir);
+      fs.chmodSync(plan.backupDir, 0o700);
+      results.push({ step: `backup to ${plan.backupDir}`, ok: true });
+    } catch (err) {
+      results.push({
+        step: `backup to ${plan.backupDir}`,
+        ok: false,
+        detail: `${err instanceof Error ? err.message : String(err)} (nothing was removed)`,
+      });
+      return results;
+    }
+  }
+
+  // 2. Docker resources of our project, re-read by label right now and
+  //    removed by name. Never `compose down`: it can reach volumes outside the
+  //    project by explicit name.
+  let dockerOk = true;
+  if (plan.compose) {
+    const label = projectLabel(plan.compose.project);
+    const now = (args: string[]) => {
+      const r = deps.run("docker", args);
+      if (!r.ok) dockerOk = record(`docker ${args.slice(0, 2).join(" ")}`, r) && dockerOk;
+      return r.ok ? lines(r.stdout) : [];
+    };
+    const containers = now(["ps", "-a", "--filter", label, "--format", "{{.Names}}"]);
+    if (containers.length > 0) dockerOk = record("remove containers", deps.run("docker", ["rm", "-f", "-v", ...containers])) && dockerOk;
+    const networks = now(["network", "ls", "--filter", label, "--format", "{{.Name}}"]);
+    if (networks.length > 0) dockerOk = record("remove networks", deps.run("docker", ["network", "rm", ...networks])) && dockerOk;
+    const volumes = now(["volume", "ls", "--filter", label, "--format", "{{.Name}}"]);
+    if (volumes.length > 0) dockerOk = record("remove volumes", deps.run("docker", ["volume", "rm", ...volumes])) && dockerOk;
+  }
+
+  // 3. Images.
   if (plan.images && plan.images.length > 0) {
     record("docker image rm", deps.run("docker", ["image", "rm", ...plan.images]));
   }
 
-  // 3. Install dir: back up or delete.
-  if (plan.installDirExists) {
-    try {
-      if (plan.backupDir) {
-        if (fs.existsSync(plan.backupDir)) throw new Error(`${plan.backupDir} already exists`);
-        fs.renameSync(plan.installDir, plan.backupDir);
-        fs.chmodSync(plan.backupDir, 0o700);
-        results.push({ step: `backup to ${plan.backupDir}`, ok: true });
-      } else {
+  // 4. Without a backup, delete the dir only once the stack is gone, so a
+  //    failed teardown never strands running containers without their config.
+  if (plan.installDirExists && !plan.backupDir) {
+    if (!dockerOk) {
+      results.push({ step: `delete ${plan.installDir}`, ok: false, detail: "skipped: Docker cleanup failed, fix that and re-run" });
+    } else {
+      try {
         fs.rmSync(plan.installDir, { recursive: true, force: true });
         results.push({ step: `delete ${plan.installDir}`, ok: true });
+      } catch (err) {
+        results.push({ step: `delete ${plan.installDir}`, ok: false, detail: err instanceof Error ? err.message : String(err) });
       }
-    } catch (err) {
-      results.push({
-        step: plan.backupDir ? `backup to ${plan.backupDir}` : `delete ${plan.installDir}`,
-        ok: false,
-        detail: err instanceof Error ? err.message : String(err),
-      });
     }
   }
 
-  // 4. syn CLI.
+  // 5. syn CLI.
   if (plan.cli) {
     record("npm uninstall -g " + SYN_CLI_PACKAGE, deps.run("npm", ["uninstall", "-g", SYN_CLI_PACKAGE]));
   }
 
-  // 5. Agent skills.
+  // 6. Agent skills.
   if (plan.skills && plan.skills.length > 0) {
     record("remove agent skills", await deps.removeSkills(plan.skills));
   }
