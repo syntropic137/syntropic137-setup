@@ -272,7 +272,7 @@ describe("executeReset", () => {
 
     const exec = calls.slice(before).filter((c) => c.args.includes("rm"));
     expect(exec.map((c) => c.args)).toEqual([
-      ["rm", "-f", "-v", "syn137-api"],
+      ["rm", "-f", "syn137-api"],
       ["network", "rm", "syn137_internal"],
       ["volume", "rm", "syn137_db_data"],
     ]);
@@ -293,6 +293,19 @@ describe("executeReset", () => {
     expect(results[0]).toMatchObject({ ok: false });
     expect(calls.slice(before)).toHaveLength(0);
     expect(fs.existsSync(installDir)).toBe(true);
+  });
+
+  it("refuses when the install dir was swapped after planning", async () => {
+    const { run, calls } = fakeDocker({ containers: ["c"] });
+    const plan = await planReset(opts({ backup: false }), probe(run));
+    fs.renameSync(installDir, `${installDir}-moved`);
+    fs.mkdirSync(installDir);
+    fs.writeFileSync(path.join(installDir, "precious.txt"), "keep me");
+    const before = calls.length;
+    const results = await executeReset(plan, { run, removeSkills: vi.fn() });
+    expect(results).toEqual([expect.objectContaining({ ok: false })]);
+    expect(calls.slice(before)).toHaveLength(0);
+    expect(fs.existsSync(path.join(installDir, "precious.txt"))).toBe(true);
   });
 
   it("keeps the install dir when Docker cleanup fails under --no-backup", async () => {

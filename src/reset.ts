@@ -63,6 +63,8 @@ export interface ComposeTargets {
 export interface ResetPlan {
   installDir: string;
   installDirExists: boolean;
+  /** Filesystem identity of the install dir when planned, to detect a swap. */
+  installDirId: { dev: number; ino: number } | null;
   /** Where the install dir goes; null means delete outright. */
   backupDir: string | null;
   /** null when Docker is unavailable. */
@@ -277,6 +279,7 @@ export async function planReset(opts: ResetOptions, probe: ResetProbe): Promise<
   return {
     installDir,
     installDirExists: exists,
+    installDirId: exists ? (({ dev, ino }) => ({ dev, ino }))(fs.lstatSync(installDir)) : null,
     backupDir: exists && opts.backup ? backupDirFor(installDir, probe.now) : null,
     compose,
     images,
@@ -346,6 +349,18 @@ export interface ResetExecDeps {
   removeSkills: (names: string[]) => Promise<CommandResult>;
 }
 
+/** Is the install dir still the same, unswapped directory the plan inspected? */
+function sameDir(plan: ResetPlan): boolean {
+  try {
+    const now = canonicalInstallDir(plan.installDir);
+    const st = fs.lstatSync(plan.installDir);
+    return now.exists && now.dir === plan.installDir && plan.installDirId !== null &&
+      st.dev === plan.installDirId.dev && st.ino === plan.installDirId.ino;
+  } catch {
+    return false;
+  }
+}
+
 /** Why execution must not start, or null. Checked by the CLI before --yes runs. */
 export function executionBlocker(plan: ResetPlan): string | null {
   if (!plan.compose && plan.installDirExists) {
@@ -361,21 +376,25 @@ export async function executeReset(plan: ResetPlan, deps: ResetExecDeps): Promis
     return r.ok;
   };
 
-  // The install dir must still be the directory we planned for.
-  if (plan.installDirExists) {
-    const now = canonicalInstallDir(plan.installDir);
-    if (!now.exists || now.dir !== plan.installDir) {
-      results.push({ step: `check ${plan.installDir}`, ok: false, detail: "changed since the plan was made" });
-      return results;
-    }
+  // The install dir must still be the very directory we planned for.
+  if (plan.installDirExists && !sameDir(plan)) {
+    results.push({ step: `check ${plan.installDir}`, ok: false, detail: "changed since the plan was made (nothing was removed)" });
+    return results;
   }
 
   // 1. Secure the backup before anything irreversible. Abort if it fails.
   if (plan.installDirExists && plan.backupDir) {
     try {
       if (fs.existsSync(plan.backupDir)) throw new Error(`${plan.backupDir} already exists`);
-      fs.renameSync(plan.installDir, plan.backupDir);
-      fs.chmodSync(plan.backupDir, 0o700);
+      // Lock it down before the move, so a moved backup is never left readable.
+      const mode = fs.statSync(plan.installDir).mode & 0o777;
+      fs.chmodSync(plan.installDir, 0o700);
+      try {
+        fs.renameSync(plan.installDir, plan.backupDir);
+      } catch (err) {
+        fs.chmodSync(plan.installDir, mode);
+        throw err;
+      }
       results.push({ step: `backup to ${plan.backupDir}`, ok: true });
     } catch (err) {
       results.push({
@@ -399,7 +418,7 @@ export async function executeReset(plan: ResetPlan, deps: ResetExecDeps): Promis
       return r.ok ? lines(r.stdout) : [];
     };
     const containers = now(["ps", "-a", "--filter", label, "--format", "{{.Names}}"]);
-    if (containers.length > 0) dockerOk = record("remove containers", deps.run("docker", ["rm", "-f", "-v", ...containers])) && dockerOk;
+    if (containers.length > 0) dockerOk = record("remove containers", deps.run("docker", ["rm", "-f", ...containers])) && dockerOk;
     const networks = now(["network", "ls", "--filter", label, "--format", "{{.Name}}"]);
     if (networks.length > 0) dockerOk = record("remove networks", deps.run("docker", ["network", "rm", ...networks])) && dockerOk;
     const volumes = now(["volume", "ls", "--filter", label, "--format", "{{.Name}}"]);
@@ -416,6 +435,8 @@ export async function executeReset(plan: ResetPlan, deps: ResetExecDeps): Promis
   if (plan.installDirExists && !plan.backupDir) {
     if (!dockerOk) {
       results.push({ step: `delete ${plan.installDir}`, ok: false, detail: "skipped: Docker cleanup failed, fix that and re-run" });
+    } else if (!sameDir(plan)) {
+      results.push({ step: `delete ${plan.installDir}`, ok: false, detail: "skipped: the directory changed during the reset" });
     } else {
       try {
         fs.rmSync(plan.installDir, { recursive: true, force: true });
