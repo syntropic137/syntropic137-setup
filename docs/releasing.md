@@ -60,8 +60,7 @@ The CI consistency check will verify that `version >= platformVersion` and that 
 Every PR is validated:
 
 - `version >= platformVersion` (no version regression)
-- All images in the compose file use `@sha256:` digest pins (no floating tags like `:latest` or `:v0.19.0`)
-- No drift between stated `platformVersion` and actual template contents
+- `ghcr.io` images in the compose file are not tagged `:latest`, `:v<version>` or `:${...}`, and every `@sha256:` digest reference exists in GHCR. Third-party images are not checked
 
 ## First-time setup
 

@@ -17,7 +17,7 @@ TypeScript strict mode is required. No `any` types.
 
 ```
 src/
-├── cli.ts          Entry point, arg parsing, 10-step init, subcommands
+├── cli.ts          Entry point, arg parsing, 12-step init, subcommands
 ├── manifest.ts     GitHub App Manifest flow (ported from Python)
 ├── server.ts       Local HTTP servers for OAuth callback + form submit
 ├── docker.ts       Docker Compose lifecycle (check, pull, up, health)
