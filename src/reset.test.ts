@@ -25,6 +25,8 @@ import {
   parseComposeProjectName,
   parseNpmGlobalVersion,
   parseSyntropicImages,
+  parseComposeImages,
+  sharedLeftoverImages,
   planReset,
   printPlan,
   type ResetOptions,
@@ -338,6 +340,25 @@ describe("executeReset", () => {
   });
 });
 
+describe("shared images note", () => {
+  it("names the compose file's third-party images that --images leaves in place", async () => {
+    fs.writeFileSync(
+      path.join(installDir, COMPOSE_FILE),
+      `name: ${SELFHOST_COMPOSE_PROJECT}\nservices:\n  redis:\n    image: redis:7-alpine\n`,
+    );
+    const plan = await planReset(opts({ images: true }), probe(fakeDocker().run));
+    const note = plan.notes.find((n) => n.startsWith("Not removed"));
+    expect(note).toContain("redis:7-alpine");
+    expect(note).toContain("docker image rm redis:7-alpine");
+    expect(plan.images).not.toContain("redis:7-alpine");
+  });
+
+  it("adds no note without --images", async () => {
+    const plan = await planReset(opts(), probe(fakeDocker().run));
+    expect(plan.notes.some((n) => n.startsWith("Not removed"))).toBe(false);
+  });
+});
+
 describe("parsers", () => {
   it("reads the compose project name", () => {
     expect(parseComposeProjectName("# hi\nname: syntropic137_selfhost\nservices:\n")).toBe("syntropic137_selfhost");
@@ -353,6 +374,45 @@ describe("parsers", () => {
 
   it("ignores images outside ghcr.io/syntropic137", () => {
     expect(parseSyntropicImages("ghcr.io/syntropic137x/evil\tlatest\t<none>\tid\n")).toEqual([]);
+  });
+
+  it("reads every image a compose file names", () => {
+    const yaml = [
+      "services:",
+      "  db:",
+      "    image: timescale/timescaledb:2.29.2-pg16",
+      "  api:",
+      "    image: ghcr.io/syntropic137/syn-api@sha256:abc",
+      "  redis:",
+      '    image: "redis:7.2.5-alpine" # pinned',
+    ].join("\n");
+    expect(parseComposeImages(yaml)).toEqual([
+      "ghcr.io/syntropic137/syn-api@sha256:abc",
+      "redis:7.2.5-alpine",
+      "timescale/timescaledb:2.29.2-pg16",
+    ]);
+  });
+
+  // Found in the fresh-install rehearsal: reset --all left the workspace image
+  // the first run pulled (2.7 GB) and the compose file's third-party images.
+  it("lists shared images the install pulled that --images leaves in place", () => {
+    const ls = [
+      "ghcr.io/syntropic137/syn-api\t<none>\t<none>\teec1dc59d564",
+      "ghcr.io/agentparadise/agentic-workspace-toolchain\t<none>\t<none>\t4a76c184a8d3",
+      "redis\t7.2.5-alpine\t<none>\t6aaf3f5e6bc8",
+      "redis\t7-alpine\t<none>\t111111111111",
+      "postgres\t16-alpine\t<none>\t222222222222",
+    ].join("\n");
+    const compose = ["redis:7.2.5-alpine", "ghcr.io/syntropic137/syn-api@sha256:abc", "minio/minio:RELEASE.x"];
+    expect(sharedLeftoverImages(ls, compose)).toEqual(["4a76c184a8d3", "redis:7.2.5-alpine"]);
+  });
+
+  it("reports digest-pinned third-party images by ID", () => {
+    const ls = ["redis\t<none>\t<none>\tdeadbeef0001", "minio/minio\t<none>\t<none>\tdeadbeef0002"].join("\n");
+    expect(sharedLeftoverImages(ls, ["redis@sha256:abc", "minio/minio:RELEASE.x@sha256:def"])).toEqual([
+      "deadbeef0001",
+      "deadbeef0002",
+    ]);
   });
 
   it("formats backup names", () => {

@@ -110,14 +110,28 @@ export function spinner(msg: string): Spinner {
 // Prompts (node:readline — no dependencies)
 // ---------------------------------------------------------------------------
 
+/** stdin already reached EOF: no listener attached now will ever hear from it. */
+function stdinEnded(): boolean {
+  return process.stdin.readableEnded || process.stdin.destroyed;
+}
+
 export function prompt(question: string, defaultValue?: string): Promise<string> {
+  if (stdinEnded()) return Promise.resolve(defaultValue || "");
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
   });
   const suffix = defaultValue ? ` ${dim(`[${defaultValue}]`)}` : "";
   return new Promise((resolve) => {
+    let answered = false;
+    // stdin closed before an answer (EOF): take the default rather than leave
+    // the promise pending, which lets the event loop drain and the process
+    // exit 0 in the middle of whatever was asking.
+    rl.on("close", () => {
+      if (!answered) resolve(defaultValue || "");
+    });
     rl.question(`  ${cyan("  ?")} ${question}${suffix}: `, (answer) => {
+      answered = true;
       rl.close();
       resolve(answer.trim() || defaultValue || "");
     });
@@ -125,6 +139,7 @@ export function prompt(question: string, defaultValue?: string): Promise<string>
 }
 
 export function promptSecret(question: string): Promise<string> {
+  if (stdinEnded()) return Promise.resolve("");
   return new Promise((resolve) => {
     const stdin = process.stdin;
     const wasRaw = stdin.isRaw;
@@ -139,6 +154,7 @@ export function promptSecret(question: string): Promise<string> {
         if (c === "\n" || c === "\r") {
           if (stdin.setRawMode) stdin.setRawMode(wasRaw ?? false);
           stdin.removeListener("data", onData);
+          stdin.removeListener("end", onEnd);
           stdin.pause();
           process.stdout.write("\n");
           resolve(value);
@@ -147,6 +163,7 @@ export function promptSecret(question: string): Promise<string> {
           // Ctrl+C — restore terminal state before exiting
           if (stdin.setRawMode) stdin.setRawMode(wasRaw ?? false);
           stdin.removeListener("data", onData);
+          stdin.removeListener("end", onEnd);
           stdin.pause();
           process.stdout.write("\n");
           process.exit(1);
@@ -162,8 +179,17 @@ export function promptSecret(question: string): Promise<string> {
         }
       }
     };
-    // Attach listener before resuming so no data events are missed.
+    // stdin closed before Enter (EOF): resolve with what was typed instead of
+    // waiting forever (the process would otherwise exit 0 mid-setup).
+    const onEnd = () => {
+      if (stdin.setRawMode) stdin.setRawMode(wasRaw ?? false);
+      stdin.removeListener("data", onData);
+      process.stdout.write("\n");
+      resolve(value);
+    };
+    // Attach listeners before resuming so no data events are missed.
     stdin.on("data", onData);
+    stdin.once("end", onEnd);
     stdin.resume();
   });
 }
@@ -408,7 +434,45 @@ export function setupOverview(opts: {
 // Summary box
 // ---------------------------------------------------------------------------
 
-export function summaryBox(opts: {
+/** Visible length of a string, ignoring ANSI colour codes. */
+export function visibleLength(s: string): number {
+  return s.replace(/\x1b\[[0-9;]*m/g, "").length;
+}
+
+/**
+ * Render content lines inside a rounded box. The box grows to fit its longest
+ * line (never narrower than `minWidth`), so a long command or path can never
+ * push the right border out of line.
+ */
+export function renderBox(lines: readonly string[], minWidth = 78): string[] {
+  const width = Math.max(minWidth, ...lines.map(visibleLength));
+  return [
+    `  ${dim(BOX.tl + BOX.h.repeat(width + 2) + BOX.tr)}`,
+    ...lines.map((l) => boxLine(l, width)),
+    `  ${dim(BOX.bl + BOX.h.repeat(width + 2) + BOX.br)}`,
+  ];
+}
+
+/** Wrap width for first-run action text, so one long action cannot widen the whole box. */
+const ACTION_WRAP = 76;
+
+/** Greedy word wrap of plain text. A single word longer than `width` gets its own line. */
+export function wrapWords(text: string, width: number): string[] {
+  const lines: string[] = [];
+  let cur = "";
+  for (const word of text.split(/\s+/).filter(Boolean)) {
+    if (cur && cur.length + 1 + word.length > width) {
+      lines.push(cur);
+      cur = word;
+    } else {
+      cur = cur ? `${cur} ${word}` : word;
+    }
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+
+export interface SummaryOptions {
   healthy: boolean;
   port: string;
   installDir: string;
@@ -416,62 +480,71 @@ export function summaryBox(opts: {
   apiUser?: string;
   /** Whether the agent skills ended up installed during this run. */
   skillsInstalled?: boolean;
-}): void {
-  const width = 78;
-  console.log();
-  console.log(`  ${dim(BOX.tl + BOX.h.repeat(width + 2) + BOX.tr)}`);
+  /** Things the user must do before a first workflow run can succeed. */
+  actions?: readonly string[];
+}
 
-  if (opts.healthy) {
-    console.log(boxLine(green(bold("  Syntropic137 is running!")), width));
-  } else {
-    console.log(boxLine(cyan(bold("  Syntropic137 is starting up...")), width));
-  }
-  console.log(boxLine("", width));
-  console.log(boxLine(`  Dashboard   ${cyan(`http://localhost:${opts.port}`)}`, width));
-  console.log(boxLine(`  Directory   ${dim(opts.installDir)}`, width));
-  console.log(boxLine("", width));
-  console.log(boxLine(dim("  Commands:"), width));
-  // Show bare command for interactive menu first
-  console.log(boxLine(`    ${bold(BIN.padEnd(30))}${dim("Interactive menu")}`, width));
-  for (const c of COMMANDS) {
-    const cmd = `${BIN} ${c.name}`;
-    console.log(boxLine(`    ${bold(cmd.padEnd(30))}${dim(c.description)}`, width));
+/** The summary box as lines, without printing. */
+export function summaryLines(opts: SummaryOptions): string[] {
+  const out: string[] = [];
+  out.push(opts.healthy ? green(bold("  Syntropic137 is running!")) : cyan(bold("  Syntropic137 is starting up...")));
+  out.push("");
+  out.push(`  Dashboard   ${cyan(`http://localhost:${opts.port}`)}`);
+  out.push(`  Directory   ${dim(opts.installDir)}`);
+
+  if (opts.actions && opts.actions.length > 0) {
+    out.push("");
+    out.push(`  ${yellow("!")} ${bold("Before your first workflow run:")}`);
+    for (const a of opts.actions) {
+      wrapWords(a, ACTION_WRAP).forEach((l, i) => out.push(`${i === 0 ? "    - " : "      "}${l}`));
+    }
   }
 
-  console.log(boxLine("", width));
-  console.log(boxLine(dim("  Next steps:"), width));
+  out.push("");
+  out.push(dim("  Commands:"));
+  // Column fits the longest command, so no command runs into its description.
+  const cmds = [{ cmd: BIN, description: "Interactive menu" }, ...COMMANDS.map((c) => ({ cmd: `${BIN} ${c.name}`, description: c.description }))];
+  const col = Math.max(...cmds.map((c) => c.cmd.length)) + 2;
+  for (const c of cmds) out.push(`    ${bold(c.cmd.padEnd(col))}${dim(c.description)}`);
+
+  out.push("");
+  out.push(dim("  Next steps:"));
   if (opts.skillsInstalled) {
-    console.log(boxLine(`    ${bold("1.")} Open Claude Code or Codex (the Syntropic137 skills are ready)`, width));
+    out.push(`    ${bold("1.")} Open Claude Code or Codex (the Syntropic137 skills are ready)`);
   } else {
-    console.log(boxLine(`    ${bold("1.")} Install the agent skills: ${cyan(`${BIN} skills`)}, then open Claude Code or Codex`, width));
+    out.push(`    ${bold("1.")} Install the agent skills: ${cyan(`${BIN} skills`)}, then open Claude Code or Codex`);
   }
-  console.log(boxLine(`    ${bold("2.")} Say: ${cyan('"Add the default Syntropic137 marketplace workflows"')}`, width));
-  console.log(boxLine(`    ${bold("3.")} Say: ${cyan('"Run code-review on my latest PR"')}`, width));
+  out.push(`    ${bold("2.")} Say: ${cyan('"Add the default Syntropic137 marketplace workflows"')}`);
+  out.push(`    ${bold("3.")} Say: ${cyan('"Run code-review on my latest PR"')}`);
 
-  console.log(boxLine("", width));
-  console.log(boxLine(`  ${yellow("!")} ${bold("Remote access & full GitHub event cycle")}`, width));
-  console.log(boxLine(`    Without a Cloudflare tunnel, only ${bold("17")} event types work (via polling).`, width));
-  console.log(boxLine(`    CI/CD events (check_run, workflow_run, deployments) require webhooks.`, width));
-  console.log(boxLine(`    Set up a tunnel: ${cyan(`${BIN} tunnel`)}`, width));
-  console.log(boxLine(`    Event reference: ${dim("github.com/syntropic137/syntropic137")}`, width));
-  console.log(boxLine(`      ${dim("packages/syn-domain/.../github/_shared/event_availability.py")}`, width));
+  out.push("");
+  out.push(`  ${yellow("!")} ${bold("Remote access & full GitHub event cycle")}`);
+  out.push(`    Without a Cloudflare tunnel, only ${bold("17")} event types work (via polling).`);
+  out.push(`    CI/CD events (check_run, workflow_run, deployments) require webhooks.`);
+  out.push(`    Set up a tunnel: ${cyan(`${BIN} tunnel`)}`);
+  out.push(`    Event reference: ${dim("github.com/syntropic137/syntropic137")}`);
+  out.push(`      ${dim("packages/syn-domain/.../github/_shared/event_availability.py")}`);
 
   if (opts.showCredentials) {
     const envPath = `"${opts.installDir}/.env"`;
     const username = opts.apiUser ?? DEFAULT_API_USER;
-    console.log(boxLine("", width));
-    console.log(boxLine(`  ${bold("Gateway credentials")} ${dim("(saved to " + opts.installDir + "/.env)")}`, width));
-    console.log(boxLine(`    Username: ${cyan(username)}`, width));
-    console.log(boxLine(`    View password:`, width));
-    console.log(boxLine(`      ${dim(`grep ${ENV_KEYS.SYN_API_PASSWORD} ${envPath} | cut -d= -f2`)}`, width));
-    console.log(boxLine(`    Copy to clipboard (macOS):`, width));
-    console.log(boxLine(`      ${dim(`grep ${ENV_KEYS.SYN_API_PASSWORD} ${envPath} | cut -d= -f2 | pbcopy`)}`, width));
-    console.log(boxLine(`    syn CLI access:`, width));
-    console.log(boxLine(`      ${dim(`export ${ENV_KEYS.SYN_API_USER}=${username}`)}`, width));
-    console.log(boxLine(`      ${dim(`export ${ENV_KEYS.SYN_API_PASSWORD}=$(grep ${ENV_KEYS.SYN_API_PASSWORD} ${envPath} | cut -d= -f2)`)}`, width));
-    console.log(boxLine(`    View: ${cyan(`${BIN} credentials show`)}`, width));
+    out.push("");
+    out.push(`  ${bold("Gateway credentials")} ${dim("(saved to " + opts.installDir + "/.env)")}`);
+    out.push(`    Username: ${cyan(username)}`);
+    out.push(`    View password:`);
+    out.push(`      ${dim(`grep ${ENV_KEYS.SYN_API_PASSWORD} ${envPath} | cut -d= -f2`)}`);
+    out.push(`    Copy to clipboard (macOS):`);
+    out.push(`      ${dim(`grep ${ENV_KEYS.SYN_API_PASSWORD} ${envPath} | cut -d= -f2 | pbcopy`)}`);
+    out.push(`    syn CLI access:`);
+    out.push(`      ${dim(`export ${ENV_KEYS.SYN_API_USER}=${username}`)}`);
+    out.push(`      ${dim(`export ${ENV_KEYS.SYN_API_PASSWORD}=$(grep ${ENV_KEYS.SYN_API_PASSWORD} ${envPath} | cut -d= -f2)`)}`);
+    out.push(`    View: ${cyan(`${BIN} credentials show`)}`);
   }
+  return out;
+}
 
-  console.log(`  ${dim(BOX.bl + BOX.h.repeat(width + 2) + BOX.br)}`);
+export function summaryBox(opts: SummaryOptions): void {
+  console.log();
+  for (const l of renderBox(summaryLines(opts))) console.log(l);
   console.log();
 }

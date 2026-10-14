@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { parseComposeVersion, checkDocker, DockerService } from "./docker.js";
+import { parseComposeVersion, checkDocker, DockerService, STATUS_TABLE_FORMAT } from "./docker.js";
 
 // Mock UI to silence output
 vi.mock("./ui.js", () => ({
@@ -137,5 +137,28 @@ describe("DockerService.start", () => {
     const docker = new DockerService("/tmp/test");
     expect(() => docker.start()).toThrow("process.exit");
     exitSpy.mockRestore();
+  });
+});
+
+describe("DockerService progress and status output", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockExecFileSync.mockReturnValue(Buffer.from(""));
+  });
+
+  // A synchronous pull blocks the event loop, so a spinner can never animate:
+  // it froze on its first frame for the whole first-install download. Compose
+  // must stream its own progress to the terminal instead.
+  it("streams pull and up progress to the terminal", () => {
+    new DockerService("/tmp/test").start();
+    const stdios = mockExecFileSync.mock.calls.map((c) => (c[2] as { stdio?: unknown }).stdio);
+    expect(stdios).toEqual(["inherit", "inherit"]);
+  });
+
+  it("status prints a compact table without image digests or commands", () => {
+    new DockerService("/tmp/test").status();
+    const args = mockExecFileSync.mock.calls[0]![1] as string[];
+    expect(args.slice(3)).toEqual(["ps", "--format", STATUS_TABLE_FORMAT]);
+    expect(STATUS_TABLE_FORMAT).not.toMatch(/Image|Command/);
   });
 });

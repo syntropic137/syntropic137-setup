@@ -10,6 +10,9 @@ import {
 } from "./constants.js";
 import { syncTemplate } from "./templates.js";
 
+/** `docker compose ps` columns that fit a normal terminal. */
+export const STATUS_TABLE_FORMAT = "table {{.Service}}\t{{.Status}}\t{{.Ports}}";
+
 /**
  * Parse a Docker Compose version string like "Docker Compose version v2.29.1"
  * and return [major, minor, patch].
@@ -28,24 +31,30 @@ export function parseComposeVersion(output: string): [number, number, number] | 
 export class DockerService {
   constructor(private readonly installDir: string) {}
 
-  /** Run `docker compose pull`. */
+  /**
+   * Run `docker compose pull`, streaming compose's own progress.
+   *
+   * The pull is synchronous, so a spinner here could never animate: it froze
+   * on its first frame for the whole download (minutes on a first install).
+   * Compose's progress output is the honest signal of what is happening.
+   */
   pull(): void {
-    const s = spinner("Pulling images...");
+    info("Pulling images (the first install downloads a few GB)...");
     try {
-      this.compose(["pull"], "pipe");
-      s.stop("Images pulled");
+      this.compose(["pull"], "inherit");
+      success("Images pulled");
     } catch (err) {
-      s.stop();
       fail("Failed to pull images. Check your internet connection and GHCR access.");
       if (err instanceof Error) info(err.message);
       process.exit(1);
     }
   }
 
-  /** Run `docker compose up -d`. Returns true if successful. */
+  /** Run `docker compose up -d`, streaming progress. Returns true if successful. */
   up(): boolean {
+    info("Starting containers (waits for each service's dependencies to be healthy)...");
     try {
-      this.compose(["up", "-d"], "pipe");
+      this.compose(["up", "-d"], "inherit");
       success("Containers started");
       return true;
     } catch (err) {
@@ -82,9 +91,13 @@ export class DockerService {
     this.compose(["logs", "--tail", "100", "-f"], "inherit");
   }
 
-  /** Run `docker compose ps`. */
+  /**
+   * Run `docker compose ps` as a compact table. The default table includes the
+   * full digest-pinned image reference and the command, which is ~250 columns
+   * wide and wraps into noise in a normal terminal.
+   */
   status(): void {
-    this.compose(["ps"], "inherit");
+    this.compose(["ps", "--format", STATUS_TABLE_FORMAT], "inherit");
   }
 
   /** Update compose template, pull latest images, and restart. */

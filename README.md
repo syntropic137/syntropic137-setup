@@ -37,8 +37,9 @@ npx @syntropic137/setup init [options]
 --dir <path>          Install directory (default: ~/.syntropic137)
 --skip-github         Skip GitHub App creation
 --skip-docker         Skip image pull and container startup (templates only)
+--install-cli         Install the syn CLI without asking (--no-install-cli skips it)
 --webhook-url <url>   Set a webhook URL for the GitHub App
--y, --yes             Answer yes instead of asking (e.g. install the agent skills without a terminal)
+-y, --yes             Answer yes instead of asking (e.g. install the agent skills and the syn CLI without a terminal)
 ```
 
 ## Lifecycle commands
@@ -75,6 +76,8 @@ npx -y skills@1.7.0 add syntropic137/syntropic137-skills --skill '*' -g -a claud
 ```
 
 The skills CLI needs Node 20.12 or newer. A failed skills install never stops `init`; it prints a warning and this command instead. Without a terminal to ask in, `init` skips the skills unless you pass `--yes`.
+
+Without a terminal, `init` never waits on a prompt: it reads the Anthropic credential from `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` if set and otherwise skips it, and installs the syn CLI only with `--yes`. The final summary lists anything still needed before a first workflow run.
 
 **Upgrading from the Claude Code plugin:** earlier versions installed a Claude Code plugin (`syntropic137@syntropic137`). The skills replace it, and keeping both duplicates commands. The `skills` step detects the plugin and offers to run `claude plugin uninstall syntropic137@syntropic137` and `claude plugin marketplace remove syntropic137` for you, but only after the skills installed successfully. Without a terminal to ask in, it only prints those commands unless you pass `--yes`. The old `plugin` subcommand still works as a deprecated alias for `skills`.
 
@@ -129,7 +132,7 @@ npx @syntropic137/setup reset --all --yes   # also images, the syn CLI and the a
 |--------|-------------|--------------|
 | Install directory | always | moved first to `<dir>.backup-YYYYMMDD-HHMMSS` (chmod 700, it holds your secrets); `--no-backup` deletes it last, and only if the Docker cleanup succeeded |
 | Selfhost compose project | always | containers, networks and volumes labelled `com.docker.compose.project=syntropic137_selfhost`, removed by name |
-| `ghcr.io/syntropic137/*` images | `--images` | `docker image rm` |
+| `ghcr.io/syntropic137/*` images | `--images` | `docker image rm`. Shared images the install also pulled (its third-party images, the agent workspace images) are listed with the command to remove them, not removed |
 | syn CLI | `--cli` | `npm uninstall -g @syntropic137/cli` |
 | Agent skills | `--skills` | removes the Syntropic137 skills with the pinned `skills` CLI; your other skills are untouched |
 

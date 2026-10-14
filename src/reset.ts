@@ -190,6 +190,45 @@ export function parseSyntropicImages(output: string): string[] {
   return [...refs].sort();
 }
 
+/** Registry prefix of the agent workspace images the API pulls for each run. */
+export const WORKSPACE_IMAGE_PREFIX = "ghcr.io/agentparadise/";
+
+/** Every `image:` reference a compose file names. */
+export function parseComposeImages(composeYaml: string): string[] {
+  const refs = new Set<string>();
+  for (const m of composeYaml.matchAll(/^\s*image:\s*["']?([^\s"'#]+)/gm)) refs.add(m[1]!);
+  return [...refs].sort();
+}
+
+/**
+ * Images the install pulled that `--images` does not remove, because other
+ * software may share them: the third-party images its compose file names and
+ * the agent workspace images. Only images present locally are returned, as
+ * `repo:tag` where there is a tag and the image ID otherwise.
+ *
+ * Reset used to leave these behind without a word (~3 GB on a first run), so
+ * a "fresh" machine still held them.
+ */
+export function sharedLeftoverImages(imageLs: string, composeImages: readonly string[]): string[] {
+  const thirdParty = composeImages.filter((r) => !r.startsWith(SYNTROPIC137_IMAGE_PREFIX));
+  const wanted = new Set(thirdParty.map((r) => r.split("@")[0]!));
+  // Digest-pinned refs (`repo@sha256:...` or `repo:tag@sha256:...`) pull as
+  // `<none>`-tagged images, matched by repository and reported by ID.
+  const digestRepos = new Set(
+    thirdParty.filter((r) => r.includes("@")).map((r) => r.split("@")[0]!.replace(/:[^/:]+$/, "")),
+  );
+  const out = new Set<string>();
+  for (const line of imageLs.split("\n")) {
+    const [repo, tag, , id] = line.trim().split("\t");
+    if (!repo) continue;
+    const ref = tag && tag !== "<none>" ? `${repo}:${tag}` : null;
+    if (repo.startsWith(WORKSPACE_IMAGE_PREFIX)) out.add(ref ?? id ?? repo);
+    else if (ref && wanted.has(ref)) out.add(ref);
+    else if (!ref && id && digestRepos.has(repo)) out.add(id);
+  }
+  return [...out].sort();
+}
+
 /** Version of the globally installed syn CLI from `npm ls -g --json`, or "". */
 export function parseNpmGlobalVersion(json: string): string {
   try {
@@ -250,6 +289,14 @@ export async function planReset(opts: ResetOptions, probe: ResetProbe): Promise<
       const r = probe.run("docker", ["image", "ls", "--format", "{{.Repository}}\t{{.Tag}}\t{{.Digest}}\t{{.ID}}"]);
       if (!r.ok) throw new ResetRefusal(`Could not list Docker images: ${(r.stderr || r.error || "").trim()}`);
       images = parseSyntropicImages(r.stdout);
+      const composeYaml = exists && fs.existsSync(composePath) ? fs.readFileSync(composePath, "utf-8") : "";
+      const shared = sharedLeftoverImages(r.stdout, parseComposeImages(composeYaml));
+      if (shared.length > 0) {
+        notes.push(
+          `Not removed, as other software may use them: ${shared.join(", ")}. ` +
+            `If nothing else needs them: docker image rm ${shared.join(" ")}`,
+        );
+      }
     } else {
       images = [];
     }

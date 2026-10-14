@@ -50,6 +50,14 @@ export const ENV_KEYS = {
 // CLI command reference (single source of truth for all user-facing commands)
 // ---------------------------------------------------------------------------
 
+/**
+ * Public path of the GitHub webhook receiver behind the gateway: the nginx
+ * `location = /api/v1/webhooks/github` in the platform's gateway entrypoint,
+ * proxied to the API's `/webhooks/github`. 1.0.1 printed
+ * `/api/v1/github/webhooks`, which the gateway does not serve.
+ */
+export const GITHUB_WEBHOOK_PATH = "/api/v1/webhooks/github";
+
 export const BIN = "npx @syntropic137/setup";
 
 export interface CommandDef {
