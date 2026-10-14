@@ -782,7 +782,7 @@ export class CLI {
     console.log();
     info("A tunnel exposes your local Syntropic137 instance to the internet,");
     info("enabling real-time GitHub webhook delivery.");
-    info(`Without a tunnel, events arrive by polling instead: the Events API types, plus completed check runs on pull request head commits.`);
+    info(`Without a tunnel, events arrive by polling instead: the Events API types, plus failed check runs on pull request head commits.`);
     console.log();
 
     const providers: MenuItem[] = [
