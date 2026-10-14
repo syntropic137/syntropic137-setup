@@ -74,15 +74,48 @@ vi.mock("./manifest.js", () => {
   };
 });
 
+// Never run npm or syn for real: `syn version` reports "not installed" and
+// every npm call is recorded instead of installing anything globally.
+const { execFileSyncMock } = vi.hoisted(() => ({ execFileSyncMock: vi.fn() }));
+vi.mock("node:child_process", () => ({
+  execFileSync: execFileSyncMock,
+  execFile: vi.fn(),
+  spawn: vi.fn(),
+}));
+
 import { parseArgs, runInit } from "./cli.js";
-import { confirm } from "./ui.js";
+import { confirm, promptSecret } from "./ui.js";
 import { GITHUB_SLUG_RE } from "./constants.js";
 
 let tmpDir: string;
 
 beforeEach(() => {
   tmpDir = path.join(os.tmpdir(), `s137-init-test-${crypto.randomUUID()}`);
+  execFileSyncMock.mockReset();
+  execFileSyncMock.mockImplementation((cmd: string) => {
+    if (cmd === "syn") throw new Error("syn: command not found");
+    return "";
+  });
 });
+
+/** Make stdin and stdout look like a terminal for the duration of `fn`. */
+async function withTerminal(fn: () => Promise<void>): Promise<void> {
+  const inDesc = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
+  const outDesc = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+  Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
+  Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+  try {
+    await fn();
+  } finally {
+    if (inDesc) Object.defineProperty(process.stdin, "isTTY", inDesc);
+    else delete (process.stdin as { isTTY?: boolean }).isTTY;
+    if (outDesc) Object.defineProperty(process.stdout, "isTTY", outDesc);
+    else delete (process.stdout as { isTTY?: boolean }).isTTY;
+  }
+}
+
+const npmInstalls = () =>
+  execFileSyncMock.mock.calls.filter((c) => c[0] === "npm" && (c[1] as string[])[0] === "install");
 
 afterEach(() => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -258,6 +291,61 @@ describe("runInit agent skills step", () => {
     skillsInstall.mockResolvedValue("failed");
     await runInit({ command: "init", dir: tmpDir, skipDocker: true, skipGithub: true, yes: true });
     expect(fs.existsSync(path.join(tmpDir, ".env"))).toBe(true);
+  });
+});
+
+describe("runInit credential step without a terminal", () => {
+  const saved = { key: process.env.ANTHROPIC_API_KEY, oauth: process.env.CLAUDE_CODE_OAUTH_TOKEN };
+  beforeEach(() => {
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    vi.mocked(promptSecret).mockClear();
+  });
+  afterEach(() => {
+    if (saved.key !== undefined) process.env.ANTHROPIC_API_KEY = saved.key;
+    if (saved.oauth !== undefined) process.env.CLAUDE_CODE_OAUTH_TOKEN = saved.oauth;
+  });
+
+  // With stdin closed, the secret prompt waited on input that never came, the
+  // event loop emptied, and init exited 0 at step 5 with no .env written.
+  it("does not prompt, and still finishes the install", async () => {
+    await runInit({ command: "init", dir: tmpDir, skipDocker: true, skipGithub: true });
+    expect(promptSecret).not.toHaveBeenCalled();
+    const env = fs.readFileSync(path.join(tmpDir, ".env"), "utf-8");
+    expect(env).toContain("APP_ENVIRONMENT=selfhost");
+    expect(env).not.toMatch(/^ANTHROPIC_API_KEY=sk-/m);
+  });
+
+  it("still prompts when there is a terminal", async () => {
+    await withTerminal(() => runInit({ command: "init", dir: tmpDir, skipDocker: true, skipGithub: true }));
+    expect(promptSecret).toHaveBeenCalledTimes(1);
+    const env = fs.readFileSync(path.join(tmpDir, ".env"), "utf-8");
+    expect(env).toMatch(/^ANTHROPIC_API_KEY=sk-ant-test-key-123$/m);
+  });
+});
+
+describe("runInit syn CLI step", () => {
+  it("installs the CLI without a terminal when --yes is given", async () => {
+    await runInit({ command: "init", dir: tmpDir, skipDocker: true, skipGithub: true, yes: true });
+    expect(npmInstalls()).toHaveLength(1);
+    expect((npmInstalls()[0]![1] as string[]).join(" ")).toMatch(/^install -g @syntropic137\/cli@~\d+\.\d+\.\d+$/);
+  });
+
+  it("skips without a terminal or --yes, and says so", async () => {
+    const { info } = await import("./ui.js");
+    vi.mocked(info).mockClear();
+    await runInit({ command: "init", dir: tmpDir, skipDocker: true, skipGithub: true });
+    expect(npmInstalls()).toHaveLength(0);
+    const said = vi.mocked(info).mock.calls.map((c) => String(c[0]));
+    expect(said.some((m) => m.includes("Skipped (non-interactive)") && m.includes("setup cli"))).toBe(true);
+  });
+
+  it("asks in a terminal", async () => {
+    vi.mocked(confirm).mockClear();
+    await withTerminal(() => runInit({ command: "init", dir: tmpDir, skipDocker: true, skipGithub: true }));
+    const asked = vi.mocked(confirm).mock.calls.map((c) => String(c[0]));
+    expect(asked.some((q) => q.includes("@syntropic137/cli"))).toBe(true);
+    expect(npmInstalls()).toHaveLength(1);
   });
 });
 

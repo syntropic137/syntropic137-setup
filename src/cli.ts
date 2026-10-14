@@ -214,6 +214,13 @@ export class InitFlow {
     if (routedFromEnv) {
       info("Found credentials in environment");
       envValues[routedFromEnv.envKey] = routedFromEnv.value;
+    } else if (!isInteractive()) {
+      // No terminal to read a secret from. Prompting here used to wait on a
+      // stdin that never delivers: with stdin closed the event loop emptied
+      // and the process exited 0 mid-setup, leaving a half-written install
+      // with no .env and no error.
+      warn("No Anthropic credential in the environment, and no terminal to ask in. Skipping.");
+      info(`Set ${ENV_KEYS.ANTHROPIC_API_KEY} or ${ENV_KEYS.CLAUDE_CODE_OAUTH_TOKEN} before init, or add one to .env later.`);
     } else {
       // Neutral prompt copy: do not name the credential type. Accept whatever
       // the user pastes, then prefix-detect to route it to the correct env
@@ -222,7 +229,8 @@ export class InitFlow {
       // to the wrong field silently breaks every workflow run.
       info("Anthropic credentials are required to run agents.");
       info("Paste your Anthropic credential below.");
-      info("Get a credential at: https://console.anthropic.com/settings/keys");
+      info("API key: https://console.anthropic.com/settings/keys");
+      info("Claude subscription: run `claude setup-token` in another terminal and paste the token.");
       const raw = await promptSecret("Anthropic credential");
       const credential = raw.trim();
       if (!credential) {
@@ -291,7 +299,7 @@ export class InitFlow {
 
     // ── Step 8: Syntropic137 CLI ─────────────────────────────────────────
     step("Syntropic137 CLI");
-    await this.installCli();
+    const cliInstalled = await this.installCli();
 
     // ── Step 9: Write .env ──────────────────────────────────────────────
     step("Writing configuration");
@@ -318,7 +326,17 @@ export class InitFlow {
     const healthy = await docker.waitForHealth(port);
 
     // ── Summary ─────────────────────────────────────────────────────────
-    summaryBox({ healthy, port, installDir: this.installDir, showCredentials: true, skillsInstalled });
+    const actions = firstRunActions({
+      hasAnthropicCredential: Boolean(
+        envValues[ENV_KEYS.ANTHROPIC_API_KEY] || envValues[ENV_KEYS.CLAUDE_CODE_OAUTH_TOKEN],
+      ),
+      hasGithubApp: Boolean(envValues[ENV_KEYS.SYN_GITHUB_APP_ID]),
+      cliInstalled,
+      envPath: path.join(this.installDir, ".env"),
+      port,
+      synApiUrl: process.env.SYN_API_URL,
+    });
+    summaryBox({ healthy, port, installDir: this.installDir, showCredentials: true, skillsInstalled, actions });
   }
 
   // ── Private ───────────────────────────────────────────────────────────
@@ -327,11 +345,20 @@ export class InitFlow {
     syncTemplate(TEMPLATES_DIR, this.installDir, relativePath);
   }
 
-  private async installCli(): Promise<void> {
-    if (!process.stdout.isTTY) return; // Skip in non-interactive/CI environments
-
+  /** Returns true when a compatible syn CLI is installed at the end of the step. */
+  private async installCli(): Promise<boolean> {
     const targetRange = `~${PLATFORM_VERSION}`; // same major.minor, patch >= platform
     const installed = InitFlow.getInstalledCliVersion();
+    // Without a terminal, --yes is the consent; without either, say so instead
+    // of printing an empty step.
+    const ask = async (question: string): Promise<boolean> => {
+      if (this.opts.yes) return true;
+      if (!isInteractive()) {
+        info(`Skipped (non-interactive). Install later: ${CMD.cli}`);
+        return false;
+      }
+      return confirm(question);
+    };
 
     if (installed) {
       // Version compatibility: major.minor must match; patch drift is allowed.
@@ -341,27 +368,30 @@ export class InitFlow {
       const [pMajor, pMinor] = PLATFORM_VERSION.split(".").map(Number);
       if (iMajor === pMajor && iMinor === pMinor) {
         success(`syn CLI ${installed} (matches platform ${PLATFORM_VERSION})`);
-        return;
+        return true;
       }
       warn(`syn CLI ${installed} does not match platform ${PLATFORM_VERSION}`);
-      const proceed = await confirm(`Update to @syntropic137/cli@${targetRange}?`);
-      if (!proceed) { info("Skipped."); return; }
+      if (!(await ask(`Update to @syntropic137/cli@${targetRange}?`))) {
+        if (isInteractive() && !this.opts.yes) info("Skipped.");
+        return false;
+      }
     } else {
       info("The syn CLI lets you manage workflows, triggers, and executions.");
-      const proceed = await confirm(`Install @syntropic137/cli@${targetRange}? (recommended)`);
-      if (!proceed) {
-        info("Skipped. Install later: npm install -g @syntropic137/cli");
-        return;
+      if (!(await ask(`Install @syntropic137/cli@${targetRange}? (recommended)`))) {
+        if (isInteractive() && !this.opts.yes) info(`Skipped. Install later: ${CMD.cli}`);
+        return false;
       }
     }
 
     try {
       execFileSync("npm", ["install", "-g", `@syntropic137/cli@${targetRange}`], { stdio: "pipe" });
       success("syn CLI installed");
+      return true;
     } catch (err) {
       warn("Could not install syn CLI.");
       if (err instanceof Error) info(err.message);
       info(`Install manually: npm install -g @syntropic137/cli@${targetRange}`);
+      return false;
     }
   }
 
@@ -404,6 +434,48 @@ export class InitFlow {
       info(`Install later: ${CMD.skills}`);
       return false;
     }
+  }
+}
+
+/**
+ * What still stands between a finished init and a first workflow run, as lines
+ * for the summary. Empty when nothing does.
+ */
+export function firstRunActions(state: {
+  hasAnthropicCredential: boolean;
+  hasGithubApp: boolean;
+  cliInstalled: boolean;
+  envPath: string;
+  port: string;
+  synApiUrl: string | undefined;
+}): string[] {
+  const out: string[] = [];
+  if (!state.hasAnthropicCredential) {
+    out.push(
+      `Add ${ENV_KEYS.ANTHROPIC_API_KEY} or ${ENV_KEYS.CLAUDE_CODE_OAUTH_TOKEN} (\`claude setup-token\`) to ${state.envPath}, then run ${CMD.start}`,
+    );
+  }
+  if (!state.hasGithubApp) {
+    out.push(`Create the GitHub App (workflows clone repos through it): re-run ${CMD.init} without --skip-github`);
+  }
+  if (!state.cliInstalled) out.push(`Install the syn CLI: ${CMD.cli}`);
+  const url = state.synApiUrl?.trim();
+  if (url && !isThisInstall(url, state.port)) {
+    out.push(`SYN_API_URL is set to ${url} in your shell, so syn and the agent skills will use that, not this install. Run: unset SYN_API_URL SYN_API_USER SYN_API_PASSWORD`);
+  }
+  return out;
+}
+
+/** Does this URL point at the local gateway on `port`? */
+export function isThisInstall(url: string, port: string): boolean {
+  try {
+    const u = new URL(url);
+    const host = u.hostname.replace(/^\[|\]$/g, "");
+    const local = host === "localhost" || host === "127.0.0.1" || host === "::1";
+    const p = u.port || (u.protocol === "https:" ? "443" : "80");
+    return local && p === String(port);
+  } catch {
+    return false;
   }
 }
 
@@ -1244,7 +1316,8 @@ ${usageLines}
     --skip-docker         Skip Docker pull/up (templates only)
     --webhook-url <url>   Webhook URL for the GitHub App
     -y, --yes             Answer yes instead of asking (installing the agent skills
-                          in a non-interactive init, removing the legacy plugin)
+                          and the syn CLI in a non-interactive init, removing the
+                          legacy plugin)
     -h, --help            Show this help
     -v, --version         Show version
 
