@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import * as crypto from "node:crypto";
-import { generateSecrets, savePem, saveWebhookSecret, saveClientSecret } from "./secrets.js";
+import { generateSecrets, savePem, saveWebhookSecret, saveClientSecret, normalizeSecretPermissions, writeMountedSecret, MOUNTED_SECRET_FILES } from "./secrets.js";
 
 // Mock UI to silence output
 vi.mock("./ui.js", () => ({
@@ -146,5 +146,56 @@ describe("saveClientSecret", () => {
     saveClientSecret(tmpDir, "client-secret-456");
     const content = fs.readFileSync(path.join(tmpDir, "github-client-secret.txt"), "utf-8");
     expect(content).toBe("client-secret-456");
+  });
+});
+
+const mode = (p: string) => fs.statSync(p).mode & 0o777;
+
+describe("secret permission invariant (#78, Codex review of #79)", () => {
+  /** An install written by 1.0.1 or older: every mounted file 0600, dir 0755. */
+  function legacyInstall(): void {
+    fs.mkdirSync(tmpDir, { recursive: true });
+    fs.chmodSync(tmpDir, 0o755);
+    for (const f of MOUNTED_SECRET_FILES) fs.writeFileSync(path.join(tmpDir, f), `old-${f}`, { mode: 0o600 });
+  }
+
+  it("normalizes a legacy 0600 install without touching contents", () => {
+    legacyInstall();
+    normalizeSecretPermissions(tmpDir);
+    expect(mode(tmpDir)).toBe(0o700);
+    for (const f of MOUNTED_SECRET_FILES) {
+      expect(mode(path.join(tmpDir, f)), f).toBe(0o644);
+      expect(fs.readFileSync(path.join(tmpDir, f), "utf-8")).toBe(`old-${f}`);
+    }
+  });
+
+  it("generate() fixes modes of files it keeps", () => {
+    legacyInstall();
+    generateSecrets(tmpDir);
+    for (const f of MOUNTED_SECRET_FILES) expect(mode(path.join(tmpDir, f)), f).toBe(0o644);
+    expect(mode(tmpDir)).toBe(0o700);
+  });
+
+  it("the PEM placeholder is 0644 even under umask 077", () => {
+    const prev = process.umask(0o077);
+    try {
+      generateSecrets(tmpDir);
+    } finally {
+      process.umask(prev);
+    }
+    for (const f of MOUNTED_SECRET_FILES) expect(mode(path.join(tmpDir, f)), f).toBe(0o644);
+  });
+
+  it("is a no-op when the secrets dir does not exist", () => {
+    expect(() => normalizeSecretPermissions(path.join(tmpDir, "absent"))).not.toThrow();
+  });
+
+  it("rotation's writer leaves an overwritten legacy 0600 file readable, and re-secures the dir", () => {
+    legacyInstall();
+    const f = MOUNTED_SECRET_FILES[0]!;
+    writeMountedSecret(tmpDir, f, "new-value");
+    expect(fs.readFileSync(path.join(tmpDir, f), "utf-8")).toBe("new-value");
+    expect(mode(path.join(tmpDir, f))).toBe(0o644);
+    expect(mode(tmpDir)).toBe(0o700);
   });
 });

@@ -26,7 +26,7 @@ import {
 } from "./ui.js";
 import type { MenuItem } from "./ui.js";
 import { checkDocker, DockerService } from "./docker.js";
-import { SecretsManager } from "./secrets.js";
+import { SecretsManager, normalizeSecretPermissions, writeMountedSecret } from "./secrets.js";
 import {
   CREDENTIALS,
   rollbackOne,
@@ -125,6 +125,7 @@ export class InitFlow {
           if (startStack) {
             checkDocker();
             try {
+              normalizeSecretPermissions(this.secretsDir);
               const docker = new DockerService(this.installDir);
               docker.start();
               await docker.waitForHealth();
@@ -568,6 +569,7 @@ export class CLI {
         break;
 
       case "start":
+        normalizeSecretPermissions(path.join(this.resolveDir(dir), "secrets"));
         new DockerService(this.resolveDir(dir)).start();
         break;
 
@@ -576,6 +578,7 @@ export class CLI {
         break;
 
       case "update":
+        normalizeSecretPermissions(path.join(this.resolveDir(dir), "secrets"));
         new DockerService(this.resolveDir(dir)).update(TEMPLATES_DIR);
         break;
 
@@ -853,6 +856,7 @@ export class CLI {
     const restart = await confirm("Restart the stack now to activate the tunnel?");
     if (restart) {
       try {
+        normalizeSecretPermissions(path.join(installDir, "secrets"));
         const docker = new DockerService(installDir);
         docker.stop();
         docker.start();
@@ -951,7 +955,7 @@ export class CLI {
           fs.copyFileSync(target, target + ".bak");
           fs.chmodSync(target + ".bak", 0o600);
         }
-        fs.writeFileSync(target, value, { mode: 0o600 });
+        writeMountedSecret(secretsDir, file, value);
       },
       log: (message) => info(message),
     };

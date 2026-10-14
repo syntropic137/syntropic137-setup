@@ -64,6 +64,9 @@ export class SecretsManager {
     if (!fs.existsSync(pemPath)) {
       fs.writeFileSync(pemPath, "", { mode: CONTAINER_READABLE_MODE });
     }
+    // Explicit modes, independent of the umask and of files kept from an
+    // earlier install (1.0.1 and older wrote them 0600).
+    normalizeSecretPermissions(this.secretsDir);
   }
 
   /** Save a GitHub App private key PEM file. Returns the file path. */
@@ -86,6 +89,40 @@ export class SecretsManager {
     const filePath = path.join(this.secretsDir, CLIENT_SECRET_FILE);
     fs.writeFileSync(filePath, secret, { mode: 0o600 });
   }
+}
+
+// ---------------------------------------------------------------------------
+// Permission invariant for the secrets the containers read
+// ---------------------------------------------------------------------------
+
+/** The secret files compose mounts into containers. */
+export const MOUNTED_SECRET_FILES: readonly string[] = [...SECRET_FILES, PEM_FILE];
+
+/**
+ * Enforce the invariant: secrets dir 0700, every mounted secret file that
+ * exists 0644. Contents are never touched. Run before the stack starts, so an
+ * install made by 1.0.1 or older (files 0600) becomes readable by the non-root
+ * containers. No-op when the directory does not exist.
+ */
+export function normalizeSecretPermissions(secretsDir: string): void {
+  if (!fs.existsSync(secretsDir)) return;
+  fs.chmodSync(secretsDir, SECRETS_DIR_MODE);
+  for (const file of MOUNTED_SECRET_FILES) {
+    const p = path.join(secretsDir, file);
+    if (fs.existsSync(p)) fs.chmodSync(p, CONTAINER_READABLE_MODE);
+  }
+}
+
+/**
+ * Write a mounted secret file (rotation and rollback). Mode is set explicitly
+ * because writeFileSync keeps an existing file's old mode, and the directory
+ * is re-secured because it is the host-side boundary.
+ */
+export function writeMountedSecret(secretsDir: string, file: string, value: string): void {
+  fs.chmodSync(secretsDir, SECRETS_DIR_MODE);
+  const target = path.join(secretsDir, file);
+  fs.writeFileSync(target, value, { mode: CONTAINER_READABLE_MODE });
+  fs.chmodSync(target, CONTAINER_READABLE_MODE);
 }
 
 // ---------------------------------------------------------------------------
