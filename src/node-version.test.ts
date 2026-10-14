@@ -36,8 +36,9 @@ describe("the stated minimum agrees everywhere", () => {
     }
   });
 
-  it("CI tests the minimum itself", () => {
+  it("CI runs the built CLI on the minimum itself", () => {
     const ci = fs.readFileSync(path.join(root, ".github/workflows/ci.yml"), "utf-8");
-    expect(ci).toContain(`"${min}.0"`);
+    expect(ci).toContain(`node-version: "${min}.0"`);
+    expect(ci).toContain(`needs Node ${min} or newer`);
   });
 });

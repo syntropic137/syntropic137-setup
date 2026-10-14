@@ -23,7 +23,9 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node-version: ["20.12.0", "20", "22"]
+        # Dev tooling (vite 7 under vitest) needs 20.19+, so the test matrix
+        # starts there; the node-floor job runs the built CLI on the floor.
+        node-version: ["20", "22"]
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -44,6 +46,53 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  # The built CLI on the oldest supported Node (MIN_NODE, 20.12.0) runs, and
+  # on an older one (18) it refuses before any command with a clear message.
+  node-floor:
+    runs-on: ubuntu-latest
+    name: Node floor (20.12.0 runs, 18 refuses)
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Setup Node.js 22 (build)
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: "22"
+
+      - name: Build
+        run: npm ci && npm run build
+
+      - name: Setup Node.js 20.12.0
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: "20.12.0"
+
+      - name: Built CLI runs on the floor
+        run: |
+          node --version
+          node dist/cli.js --version
+          node dist/cli.js --help > /dev/null
+
+      - name: Setup Node.js 18
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: "18"
+
+      - name: Built CLI refuses Node 18 before any command
+        run: |
+          node --version
+          for args in "" "init --yes --skip-github" "status" "reset" "--help"; do
+            set +e
+            out=$(node dist/cli.js $args 2>&1 < /dev/null)
+            code=$?
+            set -e
+            echo "[$args] exit=$code"
+            [ "$code" -eq 1 ] || { echo "expected exit 1"; exit 1; }
+            echo "$out" | grep -q "needs Node 20.12 or newer" || { echo "missing message: $out"; exit 1; }
+          done
+          [ ! -e "$HOME/.syntropic137" ] || { echo "init touched the install dir"; exit 1; }
 
   zero-deps:
     runs-on: ubuntu-latest
