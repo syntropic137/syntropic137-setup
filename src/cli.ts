@@ -2,9 +2,10 @@
 
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { execFileSync } from "node:child_process";
-import type { CliOptions, EnvValues } from "./types.js";
+import type { CliOptions, EnvValues, SkillsAction } from "./types.js";
 import {
   banner,
   setupOverview,
@@ -47,13 +48,23 @@ import {
   CMD,
   BIN,
   COMMANDS,
-  CLAUDE_PLUGIN_REPO,
-  CLAUDE_PLUGIN_NAME,
-  CLAUDE_PLUGIN_FULL,
   GITHUB_BASE,
   GITHUB_SLUG_RE,
+  GITHUB_WEBHOOK_PATH,
 } from "./constants.js";
 import { PKG_DIR, TEMPLATES_DIR, syncTemplate } from "./templates.js";
+import { SkillsManager, defaultRunner, skillsRemoveArgs } from "./skills.js";
+import {
+  ResetRefusal,
+  defaultSyncRunner,
+  executeReset,
+  executionBlocker,
+  planReset,
+  printGithubAppNote,
+  printPlan,
+  printResults,
+  type ResetPlan,
+} from "./reset.js";
 
 // ---------------------------------------------------------------------------
 // Version & paths
@@ -100,13 +111,17 @@ export class InitFlow {
     let reconfigure = false;
     if (this.config.exists()) {
       warn("Existing installation detected at " + this.installDir);
-      const proceed = await confirm("Reconfigure from scratch?", false);
+      // Without a terminal, take each prompt's default: never reconfigure
+      // (it wipes the stack's volumes), but do bring the stack up.
+      const interactive = isInteractive();
+      if (!interactive) info("No terminal: keeping the existing configuration.");
+      const proceed = interactive ? await confirm("Reconfigure from scratch?", false) : false;
       if (!proceed) {
         if (this.opts.skipDocker) {
           info(`Docker steps skipped (--skip-docker). Run \`${CMD.start}\` to start the stack manually.`);
         } else {
           // Offer to just bring the stack up from existing config
-          const startStack = await confirm("Start the stack from existing config?", true);
+          const startStack = interactive ? await confirm("Start the stack from existing config?", true) : true;
           if (startStack) {
             checkDocker();
             try {
@@ -204,6 +219,13 @@ export class InitFlow {
     if (routedFromEnv) {
       info("Found credentials in environment");
       envValues[routedFromEnv.envKey] = routedFromEnv.value;
+    } else if (!isInteractive()) {
+      // No terminal to read a secret from. Prompting here used to wait on a
+      // stdin that never delivers: with stdin closed the event loop emptied
+      // and the process exited 0 mid-setup, leaving a half-written install
+      // with no .env and no error.
+      warn("No Anthropic credential in the environment, and no terminal to ask in. Skipping.");
+      info(`Set ${ENV_KEYS.ANTHROPIC_API_KEY} or ${ENV_KEYS.CLAUDE_CODE_OAUTH_TOKEN} before init, or add one to .env later.`);
     } else {
       // Neutral prompt copy: do not name the credential type. Accept whatever
       // the user pastes, then prefix-detect to route it to the correct env
@@ -212,7 +234,8 @@ export class InitFlow {
       // to the wrong field silently breaks every workflow run.
       info("Anthropic credentials are required to run agents.");
       info("Paste your Anthropic credential below.");
-      info("Get a credential at: https://console.anthropic.com/settings/keys");
+      info("API key: https://console.anthropic.com/settings/keys");
+      info("Claude subscription: run `claude setup-token` in another terminal and paste the token.");
       const raw = await promptSecret("Anthropic credential");
       const credential = raw.trim();
       if (!credential) {
@@ -237,8 +260,12 @@ export class InitFlow {
       info("A browser window will open — approve the app, then return here.");
       console.log();
 
-      const proceed = await confirm("Create a GitHub App now?");
-      if (proceed) {
+      // The manifest flow needs a person at a browser; without a terminal it
+      // would wait on a callback that never comes.
+      const proceed = isInteractive() ? await confirm("Create a GitHub App now?") : false;
+      if (!isInteractive()) {
+        info("Skipped: creating the App needs a browser and a terminal. Pass --skip-github to skip it explicitly.");
+      } else if (proceed) {
         // Determine org scope
         let org = this.opts.org;
         if (!org) {
@@ -275,13 +302,13 @@ export class InitFlow {
       }
     }
 
-    // ── Step 7: Claude Code plugin ───────────────────────────────────────
-    step("Claude Code plugin");
-    await this.installClaudePlugin();
+    // ── Step 7: Agent skills (Claude Code + Codex) ──────────────────────
+    step("Agent skills");
+    const skillsInstalled = await this.installSkills();
 
     // ── Step 8: Syntropic137 CLI ─────────────────────────────────────────
     step("Syntropic137 CLI");
-    await this.installCli();
+    const cliInstalled = await this.installCli();
 
     // ── Step 9: Write .env ──────────────────────────────────────────────
     step("Writing configuration");
@@ -308,7 +335,20 @@ export class InitFlow {
     const healthy = await docker.waitForHealth(port);
 
     // ── Summary ─────────────────────────────────────────────────────────
-    summaryBox({ healthy, port, installDir: this.installDir, showCredentials: true });
+    const actions = firstRunActions({
+      dirArg: this.opts.dir && path.resolve(this.opts.dir) !== path.resolve(DEFAULT_INSTALL_DIR)
+        ? ` --dir ${shellQuote(this.installDir)}`
+        : "",
+      hasAnthropicCredential: Boolean(
+        envValues[ENV_KEYS.ANTHROPIC_API_KEY] || envValues[ENV_KEYS.CLAUDE_CODE_OAUTH_TOKEN],
+      ),
+      hasGithubApp: Boolean(envValues[ENV_KEYS.SYN_GITHUB_APP_ID]),
+      cliInstalled,
+      envPath: path.join(this.installDir, ".env"),
+      port,
+      synApiUrl: process.env.SYN_API_URL,
+    });
+    summaryBox({ healthy, port, installDir: this.installDir, showCredentials: true, skillsInstalled, actions });
   }
 
   // ── Private ───────────────────────────────────────────────────────────
@@ -317,11 +357,25 @@ export class InitFlow {
     syncTemplate(TEMPLATES_DIR, this.installDir, relativePath);
   }
 
-  private async installCli(): Promise<void> {
-    if (!process.stdout.isTTY) return; // Skip in non-interactive/CI environments
-
+  /** Returns true when a compatible syn CLI is installed at the end of the step. */
+  private async installCli(): Promise<boolean> {
+    if (this.opts.installCli === false) {
+      info(`Skipped (--no-install-cli). Install later: ${CMD.cli}`);
+      const present = InitFlow.getInstalledCliVersion();
+      return present !== null && cliMatchesPlatform(present);
+    }
     const targetRange = `~${PLATFORM_VERSION}`; // same major.minor, patch >= platform
     const installed = InitFlow.getInstalledCliVersion();
+    // Without a terminal, --yes is the consent; without either, say so instead
+    // of printing an empty step.
+    const ask = async (question: string): Promise<boolean> => {
+      if (this.opts.installCli === true || this.opts.yes) return true;
+      if (!isInteractive()) {
+        info(`Skipped (non-interactive; pass --install-cli or --yes to install). Install later: ${CMD.cli}`);
+        return false;
+      }
+      return confirm(question);
+    };
 
     if (installed) {
       // Version compatibility: major.minor must match; patch drift is allowed.
@@ -331,27 +385,30 @@ export class InitFlow {
       const [pMajor, pMinor] = PLATFORM_VERSION.split(".").map(Number);
       if (iMajor === pMajor && iMinor === pMinor) {
         success(`syn CLI ${installed} (matches platform ${PLATFORM_VERSION})`);
-        return;
+        return true;
       }
       warn(`syn CLI ${installed} does not match platform ${PLATFORM_VERSION}`);
-      const proceed = await confirm(`Update to @syntropic137/cli@${targetRange}?`);
-      if (!proceed) { info("Skipped."); return; }
+      if (!(await ask(`Update to @syntropic137/cli@${targetRange}?`))) {
+        if (isInteractive()) info("Skipped.");
+        return false;
+      }
     } else {
       info("The syn CLI lets you manage workflows, triggers, and executions.");
-      const proceed = await confirm(`Install @syntropic137/cli@${targetRange}? (recommended)`);
-      if (!proceed) {
-        info("Skipped. Install later: npm install -g @syntropic137/cli");
-        return;
+      if (!(await ask(`Install @syntropic137/cli@${targetRange}? (recommended)`))) {
+        if (isInteractive()) info(`Skipped. Install later: ${CMD.cli}`);
+        return false;
       }
     }
 
     try {
       execFileSync("npm", ["install", "-g", `@syntropic137/cli@${targetRange}`], { stdio: "pipe" });
       success("syn CLI installed");
+      return true;
     } catch (err) {
       warn("Could not install syn CLI.");
       if (err instanceof Error) info(err.message);
       info(`Install manually: npm install -g @syntropic137/cli@${targetRange}`);
+      return false;
     }
   }
 
@@ -370,79 +427,103 @@ export class InitFlow {
     }
   }
 
-  private async installClaudePlugin(): Promise<void> {
-    // Check if claude CLI is available
-    if (!InitFlow.hasClaudeCli()) {
-      info("Claude Code CLI not found — skipping plugin install.");
-      info("Install later: " + CMD.plugin);
-      return;
-    }
-
-    const installed = InitFlow.isPluginInstalled();
-    info("Adds slash commands and platform knowledge to Claude Code.");
-
-    if (installed) {
-      const proceed = await confirm("Update the Claude Code plugin?");
-      if (!proceed) { info("Skipped."); return; }
-    } else {
-      const proceed = await confirm("Install the Claude Code plugin? (recommended)");
+  /** Returns true when the skills ended up installed. Never fails the setup. */
+  private async installSkills(): Promise<boolean> {
+    info("Teaches Claude Code and Codex to drive Syntropic137 (workflows, runs, sessions).");
+    if (!this.opts.yes) {
+      if (!isInteractive()) {
+        // No terminal to ask in: global installs need explicit consent (--yes).
+        info(`Skipped (non-interactive). Install later: ${CMD.skills}`);
+        return false;
+      }
+      const proceed = await confirm("Install the Syntropic137 agent skills? (recommended)");
       if (!proceed) {
-        info("Skipped. Install later: " + CMD.plugin);
-        return;
+        info("Skipped. Install later: " + CMD.skills);
+        return false;
       }
     }
-
-    InitFlow.syncPlugin(installed);
-  }
-
-  /** Check if `claude` CLI is on PATH. */
-  static hasClaudeCli(): boolean {
+    // Problems surface as a warning and the manual command, never an exception.
     try {
-      execFileSync("claude", ["--version"], { stdio: "pipe" });
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  /** Check if the syntropic137 plugin is already installed. */
-  static isPluginInstalled(): boolean {
-    try {
-      const output = execFileSync("claude", ["plugin", "list"], {
-        encoding: "utf-8",
-        stdio: "pipe",
-      });
-      return output.includes(`${CLAUDE_PLUGIN_NAME}@`);
-    } catch {
-      return false;
-    }
-  }
-
-  /** Install or update the Claude Code plugin. */
-  static syncPlugin(isInstalled: boolean): void {
-    try {
-      if (isInstalled) {
-        // Refresh marketplace clone first (claude plugin update doesn't do this automatically)
-        try {
-          execFileSync("claude", ["plugin", "marketplace", "update", CLAUDE_PLUGIN_NAME], { stdio: "pipe" });
-        } catch (err) {
-          warn("Could not refresh marketplace cache; attempting plugin update anyway.");
-          if (err instanceof Error) info(err.message);
-        }
-        execFileSync("claude", ["plugin", "update", CLAUDE_PLUGIN_FULL], { stdio: "pipe" });
-        success("Claude Code plugin updated");
-      } else {
-        execFileSync("claude", ["plugin", "marketplace", "add", CLAUDE_PLUGIN_REPO], { stdio: "pipe" });
-        execFileSync("claude", ["plugin", "install", CLAUDE_PLUGIN_NAME], { stdio: "pipe" });
-        success("Claude Code plugin installed");
-      }
+      return (await newSkillsManager(this.opts).install()) === "installed";
     } catch (err) {
-      const action = isInstalled ? "update" : "install";
-      warn(`Could not ${action} Claude Code plugin.`);
+      warn("Could not install the Syntropic137 agent skills.");
       if (err instanceof Error) info(err.message);
-      info("Install manually: claude plugin marketplace add " + CLAUDE_PLUGIN_REPO);
+      info(`Install later: ${CMD.skills}`);
+      return false;
     }
   }
+}
+
+/**
+ * What still stands between a finished init and a first workflow run, as lines
+ * for the summary. Empty when nothing does.
+ */
+export function firstRunActions(state: {
+  /** ` --dir <quoted path>` for a non-default install, else "". */
+  dirArg?: string;
+  hasAnthropicCredential: boolean;
+  hasGithubApp: boolean;
+  cliInstalled: boolean;
+  envPath: string;
+  port: string;
+  synApiUrl: string | undefined;
+}): string[] {
+  const out: string[] = [];
+  if (!state.hasAnthropicCredential) {
+    out.push(
+      `Add ${ENV_KEYS.ANTHROPIC_API_KEY} or ${ENV_KEYS.CLAUDE_CODE_OAUTH_TOKEN} (\`claude setup-token\`) to ${state.envPath}, then run ${CMD.start}${state.dirArg ?? ""}`,
+    );
+  }
+  if (!state.hasGithubApp) {
+    out.push(
+      `No GitHub App, so workflows cannot clone repos. Adding one to an existing install is not supported yet (syntropic137/syntropic137-setup#85). A brand-new install with nothing to keep can start over: ${CMD.reset}${state.dirArg ?? ""} --yes, then ${CMD.init}${state.dirArg ?? ""} (this discards the install's data)`,
+    );
+  }
+  if (!state.cliInstalled) out.push(`Install the syn CLI: ${CMD.cli}`);
+  const url = state.synApiUrl?.trim();
+  if (url && !isThisInstall(url, state.port)) {
+    out.push(`SYN_API_URL is set to ${url} in your shell, so syn and the agent skills will use that, not this install. Run: unset SYN_API_URL SYN_API_USER SYN_API_PASSWORD`);
+  }
+  return out;
+}
+
+/** Quote a path for a POSIX shell when it needs it. */
+export function shellQuote(s: string): string {
+  return /^[A-Za-z0-9_./~@%+=:,-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+/** Does this URL point at the local gateway on `port`? */
+export function isThisInstall(url: string, port: string): boolean {
+  try {
+    const u = new URL(url);
+    const host = u.hostname.replace(/^\[|\]$/g, "");
+    const local = host === "localhost" || host === "127.0.0.1" || host === "::1";
+    const p = u.port || (u.protocol === "https:" ? "443" : "80");
+    return local && p === String(port);
+  } catch {
+    return false;
+  }
+}
+
+/** Major.minor of the syn CLI must match the platform; patch drift is allowed. */
+export function cliMatchesPlatform(installed: string, platform: string = PLATFORM_VERSION): boolean {
+  const [iMajor, iMinor] = installed.split(".").map(Number);
+  const [pMajor, pMinor] = platform.split(".").map(Number);
+  return iMajor === pMajor && iMinor === pMinor;
+}
+
+/** True when we can prompt the user. */
+function isInteractive(): boolean {
+  return Boolean(process.stdin.isTTY && process.stdout.isTTY);
+}
+
+function newSkillsManager(opts: CliOptions): SkillsManager {
+  return new SkillsManager({
+    run: defaultRunner,
+    confirm,
+    interactive: isInteractive(),
+    assumeYes: opts.yes ?? false,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -478,6 +559,8 @@ export class CLI {
 
       case "status":
         new DockerService(this.resolveDir(dir)).status();
+        console.log();
+        await newSkillsManager(this.opts).summary();
         break;
 
       case "stop":
@@ -497,7 +580,13 @@ export class CLI {
         break;
 
       case "plugin":
-        CLI.pluginSync();
+        warn(`\`${BIN} plugin\` is deprecated: the Claude Code plugin was replaced by agent skills.`);
+        info(`Running \`${CMD.skills}\` instead.`);
+        await this.skills("install");
+        break;
+
+      case "skills":
+        await this.skills(this.opts.skillsAction ?? "install");
         break;
 
       case "github-app":
@@ -514,6 +603,10 @@ export class CLI {
 
       case "credentials":
         await this.credentials(dir, this.opts.credentialsAction);
+        break;
+
+      case "reset":
+        await this.reset(dir);
         break;
     }
   }
@@ -552,15 +645,74 @@ export class CLI {
     }
   }
 
-  private static pluginSync(): void {
-    if (!InitFlow.hasClaudeCli()) {
-      fail("Claude Code CLI not found.");
-      info("Install Claude Code: https://docs.anthropic.com/en/docs/claude-code");
-      process.exit(1);
+  private async skills(action: SkillsAction): Promise<void> {
+    const manager = newSkillsManager(this.opts);
+    if (action === "status") {
+      const ok = await manager.status();
+      if (!ok) process.exitCode = 1;
+      return;
+    }
+    // `update` re-runs the install: it refreshes every skill from the source
+    // and also picks up skills added upstream since the last install.
+    const outcome = await manager.install();
+    if (outcome !== "installed") process.exitCode = 1;
+  }
+
+  // ── Factory reset ────────────────────────────────────────────────────
+
+  private async reset(dir: string): Promise<void> {
+    const execute = this.opts.yes ?? false;
+    let plan: ResetPlan;
+    try {
+      plan = await planReset(
+        {
+          installDir: dir,
+          backup: !this.opts.noBackup,
+          images: this.opts.images ?? false,
+          cli: this.opts.cli ?? false,
+          skills: this.opts.skills ?? false,
+        },
+        {
+          run: defaultSyncRunner,
+          listSkills: async () => {
+            const installed = await newSkillsManager(this.opts).listInstalled();
+            return installed ? installed.map((s) => s.name) : null;
+          },
+          homedir: os.homedir(),
+          now: new Date(),
+        },
+      );
+    } catch (err) {
+      if (err instanceof ResetRefusal) {
+        fail(err.message);
+        process.exit(1);
+      }
+      throw err;
     }
 
-    const installed = InitFlow.isPluginInstalled();
-    InitFlow.syncPlugin(installed);
+    printPlan(plan, execute);
+    const blocker = execute ? executionBlocker(plan) : null;
+    if (blocker) {
+      console.log();
+      fail(blocker);
+      info("Nothing was removed.");
+      process.exit(1);
+    }
+    if (!execute) {
+      printGithubAppNote(plan);
+      console.log();
+      info(`Dry run: nothing was removed. Re-run with ${bold("--yes")} to reset.`);
+      return;
+    }
+
+    console.log();
+    const results = await executeReset(plan, {
+      run: defaultSyncRunner,
+      removeSkills: (names) => defaultRunner("npx", skillsRemoveArgs(names), 600_000),
+    });
+    const ok = printResults(results, plan);
+    printGithubAppNote(plan);
+    if (!ok) process.exitCode = 1;
   }
 
   // ── GitHub App management ────────────────────────────────────────────
@@ -717,7 +869,7 @@ export class CLI {
     console.log();
     info(bold("Next steps:"));
     info(`  1. Verify the tunnel: open ${cyan(`https://${hostname}`)}`);
-    info(`  2. Update your GitHub App webhook URL to ${cyan(`https://${hostname}/api/v1/github/webhooks`)}`);
+    info(`  2. Update your GitHub App webhook URL to ${cyan(`https://${hostname}${GITHUB_WEBHOOK_PATH}`)}`);
     info(`  3. Run ${cyan(CMD["github-app"])} to open GitHub App settings`);
   }
 
@@ -1051,7 +1203,7 @@ export class CLI {
       process.exit(0);
     }
 
-    const subcommands = ["init", "status", "stop", "start", "logs", "update", "plugin", "github-app", "tunnel", "cli", "credentials", "help"] as const;
+    const subcommands = ["init", "status", "stop", "start", "logs", "update", "skills", "plugin", "github-app", "tunnel", "cli", "credentials", "reset", "help"] as const;
     type Subcommand = (typeof subcommands)[number];
     const firstArg = args[0];
     let command: CliOptions["command"] = "menu";
@@ -1074,26 +1226,89 @@ export class CLI {
       }
     }
 
-    for (let i = 0; i < args.length; i++) {
-      const arg = args[i]!;
+    // Parse sub-action for `skills` command: the positionals after the
+    // command, wherever the flags sit (`skills --yes status` is `status`).
+    if (command === "skills") {
+      const positionals = CLI.positionals(args.slice(1));
+      const action = positionals[0];
+      const isAction = (a: string): a is SkillsAction => a === "install" || a === "update" || a === "status";
+      if (positionals.length > 1 || (action !== undefined && !isAction(action))) {
+        fail(`Unknown skills action: ${positionals.join(" ")}`);
+        info(`Usage: ${CMD.skills} [install|update|status]`);
+        process.exit(1);
+      }
+      if (action !== undefined && isAction(action)) opts.skillsAction = action;
+    }
+
+    // `--flag=value` is the same as `--flag value`.
+    const flags = args.flatMap((a) => {
+      const eq = a.indexOf("=");
+      return a.startsWith("--") && eq > 0 && CLI.VALUE_FLAGS.has(a.slice(0, eq)) ? [a.slice(0, eq), a.slice(eq + 1)] : [a];
+    });
+    const valueOf = (i: number, flag: string): string => {
+      const v = flags[i];
+      if (v === undefined || v === "" || v.startsWith("-")) {
+        fail(`${flag} needs a value.`);
+        process.exit(1);
+      }
+      return v;
+    };
+    // reset is destructive: an argument it does not understand is an error,
+    // never something to ignore.
+    const RESET_FLAGS = new Set(["--dir", "--yes", "-y", "--no-backup", "--images", "--cli", "--skills", "--all"]);
+
+    for (let i = 0; i < flags.length; i++) {
+      const arg = flags[i]!;
+      if (command === "reset" && i > 0 && !RESET_FLAGS.has(arg)) {
+        fail(`Unknown reset argument: ${arg}`);
+        info(`Usage: ${CMD.reset} [--yes] [--no-backup] [--images] [--cli] [--skills] [--all] [--dir <path>]`);
+        process.exit(1);
+      }
       switch (arg) {
         case "--org":
-          opts.org = args[++i];
+          opts.org = valueOf(++i, arg);
           break;
         case "--name":
-          opts.name = args[++i];
+          opts.name = valueOf(++i, arg);
           break;
         case "--dir":
-          opts.dir = args[++i];
+          opts.dir = valueOf(++i, arg);
           break;
         case "--skip-github":
           opts.skipGithub = true;
+          break;
+        case "--install-cli":
+          opts.installCli = true;
+          break;
+        case "--no-install-cli":
+          opts.installCli = false;
           break;
         case "--skip-docker":
           opts.skipDocker = true;
           break;
         case "--webhook-url":
-          opts.webhookUrl = args[++i];
+          opts.webhookUrl = valueOf(++i, arg);
+          break;
+        case "--yes":
+        case "-y":
+          opts.yes = true;
+          break;
+        case "--no-backup":
+          opts.noBackup = true;
+          break;
+        case "--images":
+          opts.images = true;
+          break;
+        case "--cli":
+          opts.cli = true;
+          break;
+        case "--skills":
+          opts.skills = true;
+          break;
+        case "--all":
+          opts.images = true;
+          opts.cli = true;
+          opts.skills = true;
           break;
       }
     }
@@ -1101,18 +1316,35 @@ export class CLI {
     return opts;
   }
 
+  /** Flags that consume the next argument as their value. */
+  private static readonly VALUE_FLAGS = new Set(["--org", "--name", "--dir", "--webhook-url"]);
+
+  /** Non-flag arguments, skipping flags and the values they consume. */
+  static positionals(args: readonly string[]): string[] {
+    const out: string[] = [];
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i]!;
+      if (CLI.VALUE_FLAGS.has(a)) { i++; continue; }
+      if (a.startsWith("-")) continue;
+      out.push(a);
+    }
+    return out;
+  }
+
   private static printHelp(): void {
     // Build usage lines dynamically from COMMANDS
-    const usageLines = COMMANDS.map((c) => {
-      const cmd = `${BIN} ${c.name}${c.args ? " " + c.args : ""}`;
-      return `    ${cmd.padEnd(34)}${c.description}`;
-    }).join("\n");
+    const usage = COMMANDS.map((c) => ({
+      cmd: `${BIN} ${c.name}${c.args ? " " + c.args : ""}`,
+      description: c.description,
+    }));
+    const col = Math.max(34, ...usage.map((u) => u.cmd.length + 2));
+    const usageLines = usage.map((u) => `    ${u.cmd.padEnd(col)}${u.description}`).join("\n");
 
     console.log(`
   ${bold("syntropic137")} v${VERSION} — self-host setup CLI
 
   ${bold("USAGE")}
-    ${BIN.padEnd(34)}Interactive menu
+    ${BIN.padEnd(col)}Interactive menu
 ${usageLines}
 
   ${bold("OPTIONS")}
@@ -1121,9 +1353,21 @@ ${usageLines}
     --dir <path>          Install directory (default: ~/.syntropic137)
     --skip-github         Skip GitHub App creation
     --skip-docker         Skip Docker pull/up (templates only)
+    --install-cli         Install the syn CLI without asking (--no-install-cli skips it)
     --webhook-url <url>   Webhook URL for the GitHub App
+    -y, --yes             Answer yes instead of asking (installing the agent skills
+                          and the syn CLI in a non-interactive init, removing the
+                          legacy plugin)
     -h, --help            Show this help
     -v, --version         Show version
+
+  ${bold("RESET OPTIONS")} ${dim("(reset is a dry run until you add --yes)")}
+    --yes                 Actually remove what the dry run lists
+    --no-backup           Delete the install dir instead of moving it to a backup
+    --images              Also remove ghcr.io/syntropic137/* images
+    --cli                 Also uninstall the syn CLI (npm uninstall -g)
+    --skills              Also remove the Syntropic137 agent skills
+    --all                 --images --cli --skills
 `);
   }
 

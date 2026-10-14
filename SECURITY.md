@@ -66,8 +66,14 @@ The CLI embeds template files (`docker-compose.syntropic137.yaml`, `selfhost-ent
 - **Secret files are chmod 600** — generated secrets and PEM files are owner-read-only
 - **CSRF protection** — the GitHub App Manifest flow uses a random state parameter
   validated on callback
-- **No shell injection** — Docker commands use `execFileSync` (not `exec` with string
-  interpolation), preventing argument injection
+- **No shell injection:** every subprocess (Docker, npm, npx, claude) runs through
+  `execFileSync` or `execFile` with an argument array (never `exec` or a shell with
+  string interpolation), preventing argument injection
+- **Agent skills via a pinned CLI:** the optional skills step runs an exact
+  `skills@<version>` through npx (see `SKILLS_CLI_VERSION` in `src/constants.ts`),
+  never a floating tag. The skills themselves come from
+  `syntropic137/syntropic137-skills` and are installed only after the user agrees
+  (interactive init) or asks for them (`skills` command)
 
 ## Threat Model Summary
 
@@ -81,4 +87,4 @@ The CLI embeds template files (`docker-compose.syntropic137.yaml`, `selfhost-ent
 | Template tampering via PR | Human review required on all PRs |
 | Malicious template injection | Templates are vendored snapshots, not fetched at runtime |
 | Secret leakage in .env | Secret files chmod 600; .env excluded from git via .gitignore |
-| CLI argument injection | `execFileSync` used for all subprocess calls |
+| CLI argument injection | `execFile` / `execFileSync` with argument arrays for all subprocess calls |

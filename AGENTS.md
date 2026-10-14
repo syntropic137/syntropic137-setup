@@ -12,7 +12,7 @@ Zero-dependency CLI (`@syntropic137/setup`) for one-command Syntropic137 self-ho
 - **No auto-publish:** npm publish always requires manual human approval
 - **Templates are vendored:** embedded in the package, never fetched at runtime
 - **No shared credentials:** this repo has no access to the main repo's secrets, and vice versa
-- **`execFileSync` only:** never use `exec` with string interpolation for subprocess calls
+- **`execFile` / `execFileSync` only:** always pass an argument array, never use `exec` or a shell with string interpolation for subprocess calls
 
 ## Markdown style
 

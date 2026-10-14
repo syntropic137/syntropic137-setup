@@ -1,13 +1,30 @@
+/** Sub-actions of the `skills` command. */
+export type SkillsAction = "install" | "update" | "status";
+
 /** CLI options parsed from argv. */
 export interface CliOptions {
-  command: "init" | "status" | "stop" | "start" | "logs" | "update" | "plugin" | "github-app" | "tunnel" | "cli" | "credentials" | "menu" | "help";
+  command: "init" | "status" | "stop" | "start" | "logs" | "update" | "skills" | "plugin" | "github-app" | "tunnel" | "cli" | "credentials" | "reset" | "menu" | "help";
   /** Sub-action for the `credentials` command. */
   credentialsAction?: "show" | "rotate" | "rollback";
+  /** Sub-action for the `skills` command (default: install). */
+  skillsAction?: SkillsAction;
+  /** `--yes`: explicit consent for prompts that otherwise default to no. */
+  yes?: boolean;
+  /** reset: delete the install dir instead of backing it up (`--no-backup`). */
+  noBackup?: boolean;
+  /** reset: also remove ghcr.io/syntropic137/* images. */
+  images?: boolean;
+  /** reset: also uninstall the syn CLI. */
+  cli?: boolean;
+  /** reset: also remove the agent skills. */
+  skills?: boolean;
   org?: string;
   name?: string;
   dir?: string;
   skipGithub?: boolean;
   skipDocker?: boolean;
+  /** init: `--install-cli` (true) installs the syn CLI without asking, `--no-install-cli` (false) skips it. */
+  installCli?: boolean;
   webhookUrl?: string;
 }
 

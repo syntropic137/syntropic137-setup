@@ -23,6 +23,8 @@ src/
 ├── docker.ts       Docker Compose lifecycle (check, pull, up, health)
 ├── secrets.ts      Cryptographic secret generation
 ├── config.ts       .env template rendering
+├── reset.ts        Factory reset: plan (dry run), scope refusals, execute
+├── skills.ts       Agent skills install/update/status via the pinned `skills` CLI, legacy plugin migration
 ├── constants.ts    Shared constants (paths, defaults, command definitions)
 ├── ui.ts           ANSI colors, spinner, prompts (stdlib only)
 └── types.ts        Shared TypeScript types
