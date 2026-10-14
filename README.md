@@ -37,6 +37,7 @@ npx @syntropic137/setup init [options]
 --dir <path>          Install directory (default: ~/.syntropic137)
 --skip-github         Skip GitHub App creation
 --skip-docker         Skip image pull and container startup (templates only)
+--install-cli         Install the syn CLI without asking (--no-install-cli skips it)
 --webhook-url <url>   Set a webhook URL for the GitHub App
 -y, --yes             Answer yes instead of asking (e.g. install the agent skills and the syn CLI without a terminal)
 ```

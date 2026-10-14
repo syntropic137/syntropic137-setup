@@ -50,6 +50,7 @@ import {
   COMMANDS,
   GITHUB_BASE,
   GITHUB_SLUG_RE,
+  GITHUB_WEBHOOK_PATH,
 } from "./constants.js";
 import { PKG_DIR, TEMPLATES_DIR, syncTemplate } from "./templates.js";
 import { SkillsManager, defaultRunner, skillsRemoveArgs } from "./skills.js";
@@ -110,13 +111,17 @@ export class InitFlow {
     let reconfigure = false;
     if (this.config.exists()) {
       warn("Existing installation detected at " + this.installDir);
-      const proceed = await confirm("Reconfigure from scratch?", false);
+      // Without a terminal, take each prompt's default: never reconfigure
+      // (it wipes the stack's volumes), but do bring the stack up.
+      const interactive = isInteractive();
+      if (!interactive) info("No terminal: keeping the existing configuration.");
+      const proceed = interactive ? await confirm("Reconfigure from scratch?", false) : false;
       if (!proceed) {
         if (this.opts.skipDocker) {
           info(`Docker steps skipped (--skip-docker). Run \`${CMD.start}\` to start the stack manually.`);
         } else {
           // Offer to just bring the stack up from existing config
-          const startStack = await confirm("Start the stack from existing config?", true);
+          const startStack = interactive ? await confirm("Start the stack from existing config?", true) : true;
           if (startStack) {
             checkDocker();
             try {
@@ -255,8 +260,12 @@ export class InitFlow {
       info("A browser window will open — approve the app, then return here.");
       console.log();
 
-      const proceed = await confirm("Create a GitHub App now?");
-      if (proceed) {
+      // The manifest flow needs a person at a browser; without a terminal it
+      // would wait on a callback that never comes.
+      const proceed = isInteractive() ? await confirm("Create a GitHub App now?") : false;
+      if (!isInteractive()) {
+        info("Skipped: creating the App needs a browser and a terminal. Pass --skip-github to skip it explicitly.");
+      } else if (proceed) {
         // Determine org scope
         let org = this.opts.org;
         if (!org) {
@@ -327,6 +336,9 @@ export class InitFlow {
 
     // ── Summary ─────────────────────────────────────────────────────────
     const actions = firstRunActions({
+      dirArg: this.opts.dir && path.resolve(this.opts.dir) !== path.resolve(DEFAULT_INSTALL_DIR)
+        ? ` --dir ${shellQuote(this.installDir)}`
+        : "",
       hasAnthropicCredential: Boolean(
         envValues[ENV_KEYS.ANTHROPIC_API_KEY] || envValues[ENV_KEYS.CLAUDE_CODE_OAUTH_TOKEN],
       ),
@@ -347,14 +359,18 @@ export class InitFlow {
 
   /** Returns true when a compatible syn CLI is installed at the end of the step. */
   private async installCli(): Promise<boolean> {
+    if (this.opts.installCli === false) {
+      info(`Skipped (--no-install-cli). Install later: ${CMD.cli}`);
+      return InitFlow.getInstalledCliVersion() !== null;
+    }
     const targetRange = `~${PLATFORM_VERSION}`; // same major.minor, patch >= platform
     const installed = InitFlow.getInstalledCliVersion();
     // Without a terminal, --yes is the consent; without either, say so instead
     // of printing an empty step.
     const ask = async (question: string): Promise<boolean> => {
-      if (this.opts.yes) return true;
+      if (this.opts.installCli === true || this.opts.yes) return true;
       if (!isInteractive()) {
-        info(`Skipped (non-interactive). Install later: ${CMD.cli}`);
+        info(`Skipped (non-interactive; pass --install-cli or --yes to install). Install later: ${CMD.cli}`);
         return false;
       }
       return confirm(question);
@@ -372,13 +388,13 @@ export class InitFlow {
       }
       warn(`syn CLI ${installed} does not match platform ${PLATFORM_VERSION}`);
       if (!(await ask(`Update to @syntropic137/cli@${targetRange}?`))) {
-        if (isInteractive() && !this.opts.yes) info("Skipped.");
+        if (isInteractive()) info("Skipped.");
         return false;
       }
     } else {
       info("The syn CLI lets you manage workflows, triggers, and executions.");
       if (!(await ask(`Install @syntropic137/cli@${targetRange}? (recommended)`))) {
-        if (isInteractive() && !this.opts.yes) info(`Skipped. Install later: ${CMD.cli}`);
+        if (isInteractive()) info(`Skipped. Install later: ${CMD.cli}`);
         return false;
       }
     }
@@ -442,6 +458,8 @@ export class InitFlow {
  * for the summary. Empty when nothing does.
  */
 export function firstRunActions(state: {
+  /** ` --dir <quoted path>` for a non-default install, else "". */
+  dirArg?: string;
   hasAnthropicCredential: boolean;
   hasGithubApp: boolean;
   cliInstalled: boolean;
@@ -452,11 +470,13 @@ export function firstRunActions(state: {
   const out: string[] = [];
   if (!state.hasAnthropicCredential) {
     out.push(
-      `Add ${ENV_KEYS.ANTHROPIC_API_KEY} or ${ENV_KEYS.CLAUDE_CODE_OAUTH_TOKEN} (\`claude setup-token\`) to ${state.envPath}, then run ${CMD.start}`,
+      `Add ${ENV_KEYS.ANTHROPIC_API_KEY} or ${ENV_KEYS.CLAUDE_CODE_OAUTH_TOKEN} (\`claude setup-token\`) to ${state.envPath}, then run ${CMD.start}${state.dirArg ?? ""}`,
     );
   }
   if (!state.hasGithubApp) {
-    out.push(`Create the GitHub App (workflows clone repos through it): re-run ${CMD.init} without --skip-github`);
+    out.push(
+      `No GitHub App, so workflows cannot clone repos. Adding one later without resetting the stack is not supported yet (syntropic137/syntropic137-setup#85): before you run anything, re-run ${CMD.init}${state.dirArg ?? ""} without --skip-github and choose to reconfigure`,
+    );
   }
   if (!state.cliInstalled) out.push(`Install the syn CLI: ${CMD.cli}`);
   const url = state.synApiUrl?.trim();
@@ -464,6 +484,11 @@ export function firstRunActions(state: {
     out.push(`SYN_API_URL is set to ${url} in your shell, so syn and the agent skills will use that, not this install. Run: unset SYN_API_URL SYN_API_USER SYN_API_PASSWORD`);
   }
   return out;
+}
+
+/** Quote a path for a POSIX shell when it needs it. */
+export function shellQuote(s: string): string {
+  return /^[A-Za-z0-9_./~@%+=:,-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
 /** Does this URL point at the local gateway on `port`? */
@@ -836,7 +861,7 @@ export class CLI {
     console.log();
     info(bold("Next steps:"));
     info(`  1. Verify the tunnel: open ${cyan(`https://${hostname}`)}`);
-    info(`  2. Update your GitHub App webhook URL to ${cyan(`https://${hostname}/api/v1/github/webhooks`)}`);
+    info(`  2. Update your GitHub App webhook URL to ${cyan(`https://${hostname}${GITHUB_WEBHOOK_PATH}`)}`);
     info(`  3. Run ${cyan(CMD["github-app"])} to open GitHub App settings`);
   }
 
@@ -1244,6 +1269,12 @@ export class CLI {
         case "--skip-github":
           opts.skipGithub = true;
           break;
+        case "--install-cli":
+          opts.installCli = true;
+          break;
+        case "--no-install-cli":
+          opts.installCli = false;
+          break;
         case "--skip-docker":
           opts.skipDocker = true;
           break;
@@ -1314,6 +1345,7 @@ ${usageLines}
     --dir <path>          Install directory (default: ~/.syntropic137)
     --skip-github         Skip GitHub App creation
     --skip-docker         Skip Docker pull/up (templates only)
+    --install-cli         Install the syn CLI without asking (--no-install-cli skips it)
     --webhook-url <url>   Webhook URL for the GitHub App
     -y, --yes             Answer yes instead of asking (installing the agent skills
                           and the syn CLI in a non-interactive init, removing the

@@ -337,7 +337,7 @@ describe("runInit syn CLI step", () => {
     await runInit({ command: "init", dir: tmpDir, skipDocker: true, skipGithub: true });
     expect(npmInstalls()).toHaveLength(0);
     const said = vi.mocked(info).mock.calls.map((c) => String(c[0]));
-    expect(said.some((m) => m.includes("Skipped (non-interactive)") && m.includes("setup cli"))).toBe(true);
+    expect(said.some((m) => m.includes("Skipped (non-interactive") && m.includes("--install-cli") && m.includes("setup cli"))).toBe(true);
   });
 
   it("asks in a terminal", async () => {
@@ -351,11 +351,66 @@ describe("runInit syn CLI step", () => {
 
 describe("runInit with mocked GitHub flow", () => {
   it("writes app ID and slug to .env", async () => {
-    await runInit({ command: "init", dir: tmpDir, skipDocker: true });
+    await withTerminal(() => runInit({ command: "init", dir: tmpDir, skipDocker: true }));
 
     const content = fs.readFileSync(path.join(tmpDir, ".env"), "utf-8");
     expect(content).toContain("SYN_GITHUB_APP_ID=42");
     expect(content).toContain("SYN_GITHUB_APP_NAME=test-syntropic137");
+  });
+});
+
+describe("runInit without a terminal never waits on a person", () => {
+  // Codex review of #84: without --skip-github, the "Create a GitHub App now?"
+  // confirm (and then a browser callback) still stalled a closed-stdin init.
+  it("skips the GitHub App instead of asking or opening a browser", async () => {
+    const { GitHubAppSetup } = await import("./manifest.js");
+    vi.mocked(GitHubAppSetup).mockClear();
+    vi.mocked(confirm).mockClear();
+    await runInit({ command: "init", dir: tmpDir, skipDocker: true });
+    expect(GitHubAppSetup).not.toHaveBeenCalled();
+    expect(vi.mocked(confirm).mock.calls.map((c) => String(c[0])).some((q) => q.includes("GitHub App"))).toBe(false);
+    const env = fs.readFileSync(path.join(tmpDir, ".env"), "utf-8");
+    expect(env).toContain("APP_ENVIRONMENT=selfhost");
+    expect(env).not.toContain("SYN_GITHUB_APP_ID=42");
+  });
+
+  it("keeps an existing install as it is, without asking to reconfigure", async () => {
+    fs.mkdirSync(tmpDir, { recursive: true });
+    fs.writeFileSync(path.join(tmpDir, ".env"), "EXISTING=true");
+    vi.mocked(confirm).mockClear();
+    await runInit({ command: "init", dir: tmpDir, skipDocker: true, skipGithub: true });
+    expect(confirm).not.toHaveBeenCalled();
+    expect(fs.readFileSync(path.join(tmpDir, ".env"), "utf-8")).toBe("EXISTING=true");
+  });
+});
+
+describe("runInit --install-cli / --no-install-cli", () => {
+  it("parses both flags", () => {
+    expect(parseArgs(["node", "cli", "init", "--install-cli"]).installCli).toBe(true);
+    expect(parseArgs(["node", "cli", "init", "--no-install-cli"]).installCli).toBe(false);
+    expect(parseArgs(["node", "cli", "init"]).installCli).toBeUndefined();
+  });
+
+  it("--install-cli installs without a terminal", async () => {
+    await runInit({ command: "init", dir: tmpDir, skipDocker: true, skipGithub: true, installCli: true });
+    expect(npmInstalls()).toHaveLength(1);
+  });
+
+  it("--no-install-cli skips even with --yes in a terminal, without asking", async () => {
+    vi.mocked(confirm).mockClear();
+    await withTerminal(() =>
+      runInit({ command: "init", dir: tmpDir, skipDocker: true, skipGithub: true, yes: true, installCli: false }),
+    );
+    expect(npmInstalls()).toHaveLength(0);
+    expect(vi.mocked(confirm).mock.calls.some((c) => String(c[0]).includes("@syntropic137/cli"))).toBe(false);
+  });
+
+  // The coordinator's report: --yes still asked yes/no for the CLI in a terminal.
+  it("--yes installs in a terminal without asking", async () => {
+    vi.mocked(confirm).mockClear();
+    await withTerminal(() => runInit({ command: "init", dir: tmpDir, skipDocker: true, skipGithub: true, yes: true }));
+    expect(npmInstalls()).toHaveLength(1);
+    expect(vi.mocked(confirm).mock.calls.some((c) => String(c[0]).includes("@syntropic137/cli"))).toBe(false);
   });
 });
 
@@ -368,7 +423,7 @@ describe("runInit re-run safety", () => {
     // Mock confirm to return false (decline reconfigure)
     vi.mocked(confirm).mockResolvedValueOnce(false);
 
-    await runInit({ command: "init", dir: tmpDir, skipDocker: true, skipGithub: true });
+    await withTerminal(() => runInit({ command: "init", dir: tmpDir, skipDocker: true, skipGithub: true }));
 
     // Original .env should be untouched
     const content = fs.readFileSync(path.join(tmpDir, ".env"), "utf-8");

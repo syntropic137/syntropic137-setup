@@ -23,6 +23,8 @@ export interface CliOptions {
   dir?: string;
   skipGithub?: boolean;
   skipDocker?: boolean;
+  /** init: `--install-cli` (true) installs the syn CLI without asking, `--no-install-cli` (false) skips it. */
+  installCli?: boolean;
   webhookUrl?: string;
 }
 

@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { renderBox, summaryLines, visibleLength, wrapWords } from "./ui.js";
-import { firstRunActions, isThisInstall } from "./cli.js";
-import { BIN, COMMANDS } from "./constants.js";
+import { firstRunActions, isThisInstall, shellQuote } from "./cli.js";
+import { BIN, COMMANDS, GITHUB_WEBHOOK_PATH } from "./constants.js";
 
 const base = { healthy: true, port: "8137", installDir: "/Users/someone/.syntropic137", showCredentials: true, skillsInstalled: true };
 
@@ -63,6 +63,41 @@ describe("firstRunActions", () => {
     expect(out).toHaveLength(1);
     expect(out[0]).toContain("http://100.64.0.7:8137");
     expect(out[0]).toContain("unset SYN_API_URL");
+  });
+});
+
+describe("firstRunActions for a custom --dir", () => {
+  it("carries the quoted install dir into the commands it suggests", () => {
+    const out = firstRunActions({
+      dirArg: ` --dir ${shellQuote("/tmp/my install")}`,
+      hasAnthropicCredential: false,
+      hasGithubApp: false,
+      cliInstalled: true,
+      envPath: "/tmp/my install/.env",
+      port: "8137",
+      synApiUrl: undefined,
+    });
+    expect(out[0]).toContain(`${BIN} start --dir '/tmp/my install'`);
+    expect(out[1]).toContain(`${BIN} init --dir '/tmp/my install'`);
+    expect(out[1]).toContain("#85");
+  });
+});
+
+describe("shellQuote", () => {
+  it.each([
+    ["/Users/a/.syntropic137", "/Users/a/.syntropic137"],
+    ["/tmp/my install", "'/tmp/my install'"],
+    ["/tmp/it's", "'/tmp/it'\\''s'"],
+  ])("%s", (input, expected) => {
+    expect(shellQuote(input)).toBe(expected);
+  });
+});
+
+describe("GITHUB_WEBHOOK_PATH", () => {
+  // The gateway serves `location = /api/v1/webhooks/github`; 1.0.1's tunnel
+  // command told users to configure /api/v1/github/webhooks, which 404s.
+  it("is the path the gateway serves", () => {
+    expect(GITHUB_WEBHOOK_PATH).toBe("/api/v1/webhooks/github");
   });
 });
 

@@ -407,6 +407,14 @@ describe("parsers", () => {
     expect(sharedLeftoverImages(ls, compose)).toEqual(["4a76c184a8d3", "redis:7.2.5-alpine"]);
   });
 
+  it("reports digest-pinned third-party images by ID", () => {
+    const ls = ["redis\t<none>\t<none>\tdeadbeef0001", "minio/minio\t<none>\t<none>\tdeadbeef0002"].join("\n");
+    expect(sharedLeftoverImages(ls, ["redis@sha256:abc", "minio/minio:RELEASE.x@sha256:def"])).toEqual([
+      "deadbeef0001",
+      "deadbeef0002",
+    ]);
+  });
+
   it("formats backup names", () => {
     expect(backupDirFor("/a/b", NOW)).toBe("/a/b.backup-20261014-090507");
   });

@@ -210,8 +210,12 @@ export function parseComposeImages(composeYaml: string): string[] {
  * a "fresh" machine still held them.
  */
 export function sharedLeftoverImages(imageLs: string, composeImages: readonly string[]): string[] {
-  const wanted = new Set(
-    composeImages.filter((r) => !r.startsWith(SYNTROPIC137_IMAGE_PREFIX)).map((r) => r.split("@")[0]!),
+  const thirdParty = composeImages.filter((r) => !r.startsWith(SYNTROPIC137_IMAGE_PREFIX));
+  const wanted = new Set(thirdParty.map((r) => r.split("@")[0]!));
+  // Digest-pinned refs (`repo@sha256:...` or `repo:tag@sha256:...`) pull as
+  // `<none>`-tagged images, matched by repository and reported by ID.
+  const digestRepos = new Set(
+    thirdParty.filter((r) => r.includes("@")).map((r) => r.split("@")[0]!.replace(/:[^/:]+$/, "")),
   );
   const out = new Set<string>();
   for (const line of imageLs.split("\n")) {
@@ -220,6 +224,7 @@ export function sharedLeftoverImages(imageLs: string, composeImages: readonly st
     const ref = tag && tag !== "<none>" ? `${repo}:${tag}` : null;
     if (repo.startsWith(WORKSPACE_IMAGE_PREFIX)) out.add(ref ?? id ?? repo);
     else if (ref && wanted.has(ref)) out.add(ref);
+    else if (!ref && id && digestRepos.has(repo)) out.add(id);
   }
   return [...out].sort();
 }

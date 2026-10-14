@@ -117,7 +117,15 @@ export function prompt(question: string, defaultValue?: string): Promise<string>
   });
   const suffix = defaultValue ? ` ${dim(`[${defaultValue}]`)}` : "";
   return new Promise((resolve) => {
+    let answered = false;
+    // stdin closed before an answer (EOF): take the default rather than leave
+    // the promise pending, which lets the event loop drain and the process
+    // exit 0 in the middle of whatever was asking.
+    rl.on("close", () => {
+      if (!answered) resolve(defaultValue || "");
+    });
     rl.question(`  ${cyan("  ?")} ${question}${suffix}: `, (answer) => {
+      answered = true;
       rl.close();
       resolve(answer.trim() || defaultValue || "");
     });
@@ -139,6 +147,7 @@ export function promptSecret(question: string): Promise<string> {
         if (c === "\n" || c === "\r") {
           if (stdin.setRawMode) stdin.setRawMode(wasRaw ?? false);
           stdin.removeListener("data", onData);
+          stdin.removeListener("end", onEnd);
           stdin.pause();
           process.stdout.write("\n");
           resolve(value);
@@ -147,6 +156,7 @@ export function promptSecret(question: string): Promise<string> {
           // Ctrl+C — restore terminal state before exiting
           if (stdin.setRawMode) stdin.setRawMode(wasRaw ?? false);
           stdin.removeListener("data", onData);
+          stdin.removeListener("end", onEnd);
           stdin.pause();
           process.stdout.write("\n");
           process.exit(1);
@@ -162,8 +172,17 @@ export function promptSecret(question: string): Promise<string> {
         }
       }
     };
-    // Attach listener before resuming so no data events are missed.
+    // stdin closed before Enter (EOF): resolve with what was typed instead of
+    // waiting forever (the process would otherwise exit 0 mid-setup).
+    const onEnd = () => {
+      if (stdin.setRawMode) stdin.setRawMode(wasRaw ?? false);
+      stdin.removeListener("data", onData);
+      process.stdout.write("\n");
+      resolve(value);
+    };
+    // Attach listeners before resuming so no data events are missed.
     stdin.on("data", onData);
+    stdin.once("end", onEnd);
     stdin.resume();
   });
 }
