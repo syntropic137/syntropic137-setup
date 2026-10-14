@@ -63,7 +63,7 @@ The CLI embeds template files (`docker-compose.syntropic137.yaml`, `selfhost-ent
 - **Zero runtime dependencies** — Node 20.12+ stdlib only (`node:http`, `node:https`,
   `node:crypto`, `node:fs`, `node:child_process`, `node:readline`)
 - **TypeScript strict mode** — `"strict": true` in tsconfig, no `any` types
-- **Secret files are chmod 600** — generated secrets and PEM files are owner-read-only
+- **Secret files live in a 0700 directory** - the `secrets/` directory is owner-only (0700), so no other host user can reach them. The files compose mounts into containers (generated passwords, GitHub App PEM) are 0644 inside it, because the containers read them as non-root users (#78); backups (`*.bak`) and non-mounted GitHub secrets stay 0600
 - **CSRF protection** — the GitHub App Manifest flow uses a random state parameter
   validated on callback
 - **No shell injection:** every subprocess (Docker, npm, npx, claude) runs through
@@ -86,5 +86,5 @@ The CLI embeds template files (`docker-compose.syntropic137.yaml`, `selfhost-ent
 | Dependency hijack | Zero runtime dependencies |
 | Template tampering via PR | Human review required on all PRs |
 | Malicious template injection | Templates are vendored snapshots, not fetched at runtime |
-| Secret leakage in .env | Secret files chmod 600; .env excluded from git via .gitignore |
+| Secret leakage in .env | Secrets are separate files in a 0700 directory, not in .env; .env is 0600 and excluded from git via .gitignore |
 | CLI argument injection | `execFile` / `execFileSync` with argument arrays for all subprocess calls |

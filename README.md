@@ -15,7 +15,7 @@ The `init` command walks you through a 12-step interactive setup:
 1. **Check Docker:** verifies Docker and Compose v2.20+ are installed and running
 2. **Create directory:** sets up `~/.syntropic137/` with the required structure
 3. **Copy templates:** writes the Docker Compose file, entrypoint script, env template, and database init SQL
-4. **Generate secrets:** creates cryptographically random passwords for Postgres, Redis, and MinIO (chmod 600)
+4. **Generate secrets:** creates cryptographically random passwords for Postgres, Redis, and MinIO (files 0644 inside a 0700 `secrets/` directory, so the containers can read them and no other host user can)
 5. **Configure LLM provider:** prompts for your Anthropic API key (or picks up `ANTHROPIC_API_KEY` from your environment)
 6. **GitHub App setup:** runs the [GitHub App Manifest flow](https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest) to create a GitHub App with the right permissions in one click (optional, skippable)
 7. **Agent skills:** installs the [Syntropic137 agent skills](https://github.com/syntropic137/syntropic137-skills) globally for Claude Code and Codex, whichever you have (optional, skippable)
@@ -90,7 +90,7 @@ When you don't pass `--skip-github`, the CLI creates a GitHub App automatically.
 3. GitHub shows you a "Create App" confirmation page, then you click Create
 4. GitHub redirects back to the local server with a temporary code
 5. The CLI exchanges that code for the app's credentials (private key, webhook secret, client secret) via the GitHub API
-6. Credentials are saved to `~/.syntropic137/secrets/` with chmod 600
+6. Credentials are saved to `~/.syntropic137/secrets/` (0644 inside the 0700 directory; the API container reads the PEM as a non-root user)
 7. Your browser opens the app's installation page so you can choose which repos to grant access
 
 The private key (PEM) is mounted into containers as a Docker secret (tmpfs-backed, never written to the container filesystem). Installation IDs are resolved dynamically at runtime, so the app can be installed across multiple orgs and repos. Repositories granted to the installation are discovered automatically at startup and refreshed every hour without requiring a webhook URL.
@@ -109,10 +109,10 @@ Everything lives in `~/.syntropic137/`:
 ├── init-db/
 │   └── 01-create-databases.sql        # Database schema
 ├── secrets/
-│   ├── db-password.secret             # Postgres password (chmod 600)
-│   ├── redis-password.secret          # Redis password (chmod 600)
-│   ├── minio-password.secret          # MinIO password (chmod 600)
-│   └── github-app-private-key.pem     # GitHub App private key (chmod 600)
+│   ├── db-password.secret             # Postgres password (0644; dir is 0700)
+│   ├── redis-password.secret          # Redis password (0644; dir is 0700)
+│   ├── minio-password.secret          # MinIO password (0644; dir is 0700)
+│   └── github-app-private-key.pem     # GitHub App private key (0644; dir is 0700)
 └── workspaces/                        # Agent workspace mount
 ```
 
@@ -173,7 +173,7 @@ This repo is the supply chain entry point for every `npx @syntropic137/setup` us
 - **Separate repo from the platform:** compromising the main Syntropic137 repo does not grant npm publish access. The cross-repo dispatch token can trigger workflow runs here but cannot push code, merge PRs, or alter what gets published.
 - **Publish only deploys reviewed code:** npm publish deploys whatever is on `main`. Since the dispatch token has no write access to repository contents, it cannot inject malicious code into the publish pipeline. The only path to `main` is through a human-reviewed PR.
 - **Trusted Publishing (OIDC):** no npm token is stored anywhere. Every published version includes a signed [provenance attestation](https://docs.npmjs.com/generating-provenance-statements) linking it to the exact commit and workflow run. Verify with `npm audit signatures`.
-- **Secrets never in .env:** passwords and keys are stored as separate files (chmod 600) and mounted as Docker secrets (tmpfs-backed, never on the container filesystem).
+- **Secrets never in .env:** passwords and keys are stored as separate files (0644 inside a 0700 `secrets/` directory) and mounted as Docker secrets (tmpfs-backed, never on the container filesystem).
 - **No auto-publish:** npm releases require a manual `workflow_dispatch` trigger. Template syncs from upstream open a PR but never auto-merge or auto-publish.
 
 ## Contributing
