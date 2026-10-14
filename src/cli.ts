@@ -453,6 +453,8 @@ export class CLI {
 
       case "status":
         new DockerService(this.resolveDir(dir)).status();
+        console.log();
+        await newSkillsManager(this.opts).summary();
         break;
 
       case "stop":

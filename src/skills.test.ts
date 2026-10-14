@@ -44,11 +44,17 @@ function fakeRunner(opts: {
     if (cmd === "claude" && args.join(" ") === "plugin list") return ok(opts.pluginList ?? "");
     if (cmd === "claude" && args.join(" ") === "plugin marketplace list") return ok(opts.marketplaceList ?? "");
     if (cmd === "claude") return ok();
-    if (cmd === "npx" && args[2] === "add") return opts.add ?? ok();
+    if (cmd === "npx" && args[2] === "add") return opts.add ?? ok(addJson(args));
     if (cmd === "npx" && args[2] === "ls") return opts.list ?? ok(LIST_JSON);
     return bad(`unexpected ${cmd} ${args.join(" ")}`);
   };
   return { run, calls };
+}
+
+/** What `skills add --json` prints: every skill linked into each requested agent. */
+function addJson(args: readonly string[], names = ["execution-control", "syn-workflow"]): string {
+  const labels = SKILLS_AGENTS.filter((a) => args.includes(a.id)).map((a) => a.label);
+  return JSON.stringify(names.map((name) => ({ name, status: "installed", source: SKILLS_REPO, agents: labels })));
 }
 
 const LIST_JSON = JSON.stringify([
@@ -91,6 +97,7 @@ describe("command construction", () => {
       "-y", SKILLS_CLI_PACKAGE, "add", SKILLS_REPO, "--skill", "*", "-g",
       "-a", "claude-code", "-a", "codex", "-y",
     ]);
+    expect(skillsAddArgs(SKILLS_AGENTS, true).at(-1)).toBe("--json");
   });
 
   it("only targets detected agents", () => {
@@ -139,8 +146,9 @@ describe("SkillsManager.install", () => {
     const { m } = manager(run, { bins: BOTH });
     expect(await m.install()).toBe("installed");
     const add = calls.find((c) => c.cmd === "npx" && c.args[2] === "add");
-    expect(add?.args).toEqual(skillsAddArgs(SKILLS_AGENTS));
+    expect(add?.args).toEqual(skillsAddArgs(SKILLS_AGENTS, true));
     expect(allOutput()).toContain("Claude Code and Codex (2 skills)");
+    expect(allOutput()).toContain("execution-control, syn-workflow");
   });
 
   it("installs for codex only when claude is missing, and skips the plugin check", async () => {
@@ -177,10 +185,21 @@ describe("SkillsManager.install", () => {
     expect(out).toContain(`--skill '*' -g -a claude-code -y`);
   });
 
-  it("treats exit 0 with no skills on disk as a failure", async () => {
-    const { run } = fakeRunner({ list: ok("[]") });
+  it("treats exit 0 with no skills reported as a failure", async () => {
+    const { run } = fakeRunner({ add: ok("[]") });
     const { m } = manager(run, { bins: BOTH });
     expect(await m.install()).toBe("failed");
+  });
+
+  it("treats a per-skill failure as a failure", async () => {
+    const add = ok(JSON.stringify([
+      { name: "a", status: "installed", agents: ["Claude Code", "Codex"] },
+      { name: "b", status: "failed", agents: [] },
+    ]));
+    const { run } = fakeRunner({ add });
+    const { m } = manager(run, { bins: BOTH });
+    expect(await m.install()).toBe("failed");
+    expect(allOutput()).toContain("Failed: b");
   });
 });
 
@@ -213,6 +232,15 @@ describe("legacy plugin migration", () => {
     const firstRemoval = calls.findIndex((c) => c.cmd === "claude" && c.args[1] === "uninstall");
     expect(addAt).toBeGreaterThanOrEqual(0);
     expect(firstRemoval).toBeGreaterThan(addAt);
+  });
+
+  it("never removes the plugin when Claude Code did not get the skills", async () => {
+    const add = ok(JSON.stringify([{ name: "a", status: "installed", agents: ["Codex"] }]));
+    const { run, calls } = fakeRunner({ ...legacy, add });
+    const { m } = manager(run, { bins: BOTH, assumeYes: true });
+    expect(await m.install()).toBe("failed");
+    expect(removals(calls)).toHaveLength(0);
+    expect(allOutput()).toContain("Not linked for: Claude Code");
   });
 
   it("never removes the plugin when the skills install failed", async () => {

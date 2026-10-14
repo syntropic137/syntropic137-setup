@@ -83,10 +83,12 @@ export const defaultRunner: CommandRunner = (cmd, args, timeoutMs = PROBE_TIMEOU
 // ---------------------------------------------------------------------------
 
 /** `npx` arguments that install every Syntropic137 skill globally for `agents`. */
-export function skillsAddArgs(agents: readonly SkillsAgent[]): string[] {
+export function skillsAddArgs(agents: readonly SkillsAgent[], json = false): string[] {
   const args = ["-y", SKILLS_CLI_PACKAGE, "add", SKILLS_REPO, "--skill", "*", "-g"];
   for (const a of agents) args.push("-a", a.id);
   args.push("-y");
+  // --json makes per-skill failures visible (and the exit code honest).
+  if (json) args.push("--json");
   return args;
 }
 
@@ -156,6 +158,37 @@ function normaliseSource(source: string): string {
     .replace(/#.*$/, "")
     .replace(/\.git$/, "")
     .replace(/\/+$/, "");
+}
+
+export interface AddResult {
+  name: string;
+  ok: boolean;
+  /** Agent display names the skill was linked into, e.g. "Claude Code". */
+  agents: string[];
+}
+
+/** Per-skill results from `skills add --json`, or null if not that JSON. */
+export function parseAddResults(json: string): AddResult[] | null {
+  let data: unknown;
+  try {
+    data = JSON.parse(json);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(data)) return null;
+  const out: AddResult[] = [];
+  for (const entry of data as unknown[]) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const e = entry as { name?: unknown; status?: unknown; agents?: unknown };
+    if (typeof e.name !== "string") continue;
+    const status = typeof e.status === "string" ? e.status : "";
+    out.push({
+      name: e.name,
+      ok: status === "installed" || status === "updated" || status === "unchanged",
+      agents: Array.isArray(e.agents) ? e.agents.filter((a): a is string => typeof a === "string") : [],
+    });
+  }
+  return out;
 }
 
 /** Does `claude plugin list` output show the legacy plugin? */
@@ -233,7 +266,7 @@ function tail(result: CommandResult, lines = 6): string[] {
     .split("\n")
     .map((l) => l.replace(/^[\s│◇◆└┌├─╮╯]+/, "").trim())
     .filter((l) => l && !l.startsWith("npm notice"));
-  const picked = text.slice(-lines);
+  const picked = text.filter((l) => !/^[[\]{}",]/.test(l)).slice(-lines);
   if (picked.length === 0 && result.error) picked.push(result.error);
   return picked;
 }
@@ -288,23 +321,29 @@ export class SkillsManager {
     // The spinner redraws with \r, which only makes sense on a terminal.
     const spin = process.stdout.isTTY ? spinner(message) : null;
     if (!spin) info(message);
-    const result = await this.deps.run(NPX, skillsAddArgs(agents), INSTALL_TIMEOUT_MS);
+    const result = await this.deps.run(NPX, skillsAddArgs(agents, true), INSTALL_TIMEOUT_MS);
     spin?.stop();
 
-    // Exit 0 is not proof: confirm the skills are actually there.
-    const installed = result.ok ? await this.listInstalled() : null;
-    if (!result.ok || !installed || installed.length === 0) {
+    // Exit 0 is not proof: every skill must report success for every agent.
+    const results = result.ok ? parseAddResults(result.stdout) : null;
+    const failed = results?.filter((r) => !r.ok) ?? [];
+    const missingAgent = (label: string) => results?.some((r) => !r.agents.includes(label)) ?? true;
+    const brokenAgents = agents.filter((a) => missingAgent(a.label));
+    if (!result.ok || !results || results.length === 0 || failed.length > 0 || brokenAgents.length > 0) {
       warn(`Could not install the Syntropic137 skills for ${labels}.`);
+      if (failed.length > 0) info(dim(`Failed: ${failed.map((r) => r.name).join(", ")}`));
+      if (results && brokenAgents.length > 0) info(dim(`Not linked for: ${brokenAgents.map((a) => a.label).join(", ")}`));
       for (const line of tail(result)) info(dim(line));
       info("Install manually:");
       info(`  ${bold(formatCommand(NPX, skillsAddArgs(agents)))}`);
       return "failed";
     }
 
-    success(`Syntropic137 skills installed for ${labels} (${installed.length} skills)`);
-    info(dim(installed.map((s) => s.name).join(", ")));
+    success(`Syntropic137 skills installed for ${labels} (${results.length} skills)`);
+    info(dim(results.map((r) => r.name).sort().join(", ")));
 
-    // Only offer to remove the old plugin once its replacement is in place.
+    // Only offer to remove the old plugin once its replacement is in place
+    // for Claude Code specifically (checked above for every detected agent).
     if (agents.some((a) => a.id === "claude-code")) {
       await this.migrateLegacyPlugin();
     }
@@ -343,6 +382,20 @@ export class SkillsManager {
       }
     }
     return installed !== null && installed.length > 0;
+  }
+
+  /** One-line skills state, for the `status` command. */
+  async summary(): Promise<void> {
+    const agents = this.agents();
+    const installed = await this.listInstalled();
+    const found = agents.length > 0 ? agents.map((a) => a.label).join(", ") : "no Claude Code or Codex found";
+    if (installed && installed.length > 0) {
+      success(`Agent skills: ${installed.length} Syntropic137 skills installed ${dim(`(${found})`)}`);
+    } else if (installed) {
+      warn(`Agent skills: not installed ${dim(`(${found})`)}`);
+    } else {
+      warn("Agent skills: could not check (the skills CLI needs Node 20.12+)");
+    }
   }
 
   /** Global Syntropic137 skills, or null when the skills CLI could not list them. */
