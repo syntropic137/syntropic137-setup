@@ -7,6 +7,12 @@ import * as os from "node:os";
 
 export const DEFAULT_INSTALL_DIR = path.join(os.homedir(), ".syntropic137");
 export const COMPOSE_FILE = "docker-compose.syntropic137.yaml";
+/** The `name:` the selfhost compose file declares. Reset touches no other project. */
+export const SELFHOST_COMPOSE_PROJECT = "syntropic137_selfhost";
+/** Registry prefix of every Syntropic137 image (`reset --images`). */
+export const SYNTROPIC137_IMAGE_PREFIX = "ghcr.io/syntropic137/";
+/** npm package of the `syn` CLI. */
+export const SYN_CLI_PACKAGE = "@syntropic137/cli";
 
 // ---------------------------------------------------------------------------
 // Defaults
@@ -69,6 +75,7 @@ export const COMMANDS: readonly CommandDef[] = [
   { name: "github-app",  description: "Open GitHub App settings in your browser" },
   { name: "tunnel",      description: "Set up remote access (Cloudflare tunnel)" },
   { name: "credentials", description: "View, rotate, or roll back service credentials", args: "[show|rotate|rollback]" },
+  { name: "reset",       description: "Factory reset: remove the install (dry run unless --yes)", args: "[options]" },
 ] as const;
 
 /** Shorthand lookup: CMD.init → "npx @syntropic137/setup init" */
