@@ -297,10 +297,10 @@ export class InitFlow {
         } catch (err) {
           fail("GitHub App creation failed.");
           if (err instanceof Error) info(err.message);
-          info(`You can set up GitHub integration later with \`${CMD.skipDocker}\`.`);
+          info("Adding a GitHub App to an existing install is not supported yet (syntropic137/syntropic137-setup#85).");
         }
       } else {
-        info("Skipped. You can create a GitHub App later.");
+        info("Skipped. Adding a GitHub App to this install later is not supported yet (syntropic137/syntropic137-setup#85).");
       }
     }
 
@@ -729,7 +729,7 @@ export class CLI {
 
     if (!slug) {
       fail("No GitHub App configured.");
-      info(`Run \`${CMD.init}\` to create one, or set ${ENV_KEYS.SYN_GITHUB_APP_NAME} in .env.`);
+      info(`If the App exists, set ${ENV_KEYS.SYN_GITHUB_APP_NAME} in .env. Adding a new App to an existing install is not supported yet (syntropic137/syntropic137-setup#85).`);
       process.exit(1);
     }
 
@@ -773,7 +773,7 @@ export class CLI {
     const existingPassword = existingEnv[ENV_KEYS.SYN_API_PASSWORD];
     if (!existingPassword || existingPassword.trim() === "") {
       fail(`${ENV_KEYS.SYN_API_PASSWORD} is not set — the tunnel would expose your API without authentication.`);
-      info(`Run: ${CMD["credentials"]} rotate to generate credentials first.`);
+      info(`Set ${ENV_KEYS.SYN_API_PASSWORD} in ${path.join(installDir, ".env")} (for example \`openssl rand -hex 32\`), then run \`${CMD.stop}\` and \`${CMD.start}\`.`);
       process.exit(1);
     }
 
@@ -782,7 +782,7 @@ export class CLI {
     console.log();
     info("A tunnel exposes your local Syntropic137 instance to the internet,");
     info("enabling GitHub webhooks and full event coverage (60+ event types).");
-    info(`Without a tunnel, only ${bold("17")} event types work (via polling).`);
+    info(`Without a tunnel, polling covers ${bold("17")} event types plus check_run results.`);
     console.log();
 
     const providers: MenuItem[] = [
