@@ -51,7 +51,7 @@ export interface RotationDeps {
   recreate(services: readonly string[]): void;
   /** Current contents of a secret file, trimmed. */
   readSecret(file: string): string;
-  /** Write a secret file with mode 600. */
+  /** Write a mounted secret file: mode 0644 inside the 0700 secrets dir (see secrets.ts). */
   writeSecret(file: string, value: string): void;
   /** Emit human-readable progress. */
   log(message: string): void;
