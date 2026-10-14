@@ -86,5 +86,5 @@ The CLI embeds template files (`docker-compose.syntropic137.yaml`, `selfhost-ent
 | Dependency hijack | Zero runtime dependencies |
 | Template tampering via PR | Human review required on all PRs |
 | Malicious template injection | Templates are vendored snapshots, not fetched at runtime |
-| Secret leakage in .env | Service passwords and the GitHub App key are separate files in a 0700 directory; the gateway password, Anthropic credential, webhook secret and tunnel token are in .env, which is 0600 and excluded from git via .gitignore |
+| Secret leakage in .env | Service passwords and the GitHub App key are separate files in a 0700 directory; the gateway password, Anthropic credential, webhook secret and tunnel token are in .env, which `init` creates as 0600 and is excluded from git via .gitignore |
 | CLI argument injection | `execFile` / `execFileSync` / `spawn` with argument arrays for all subprocess calls (the Windows browser opener goes through `cmd.exe /c start`) |

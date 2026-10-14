@@ -781,8 +781,8 @@ export class CLI {
     info(bold("Remote Access Setup"));
     console.log();
     info("A tunnel exposes your local Syntropic137 instance to the internet,");
-    info("enabling GitHub webhooks and full event coverage (60+ event types).");
-    info(`Without a tunnel, polling covers ${bold("17")} event types plus check_run results.`);
+    info("enabling real-time GitHub webhook delivery.");
+    info(`Without a tunnel, events arrive by polling instead: the Events API types, plus completed check runs on pull request head commits.`);
     console.log();
 
     const providers: MenuItem[] = [

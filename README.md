@@ -90,7 +90,7 @@ When you don't pass `--skip-github`, the CLI creates a GitHub App automatically.
 3. GitHub shows you a "Create App" confirmation page, then you click Create
 4. GitHub redirects back to the local server with a temporary code
 5. The CLI exchanges that code for the app's credentials (private key, webhook secret, client secret) via the GitHub API
-6. Credentials are saved to `~/.syntropic137/secrets/`, inside the 0700 directory: the PEM 0644 (the API container reads it as a non-root user), the webhook and client secrets 0600
+6. Credentials are saved to `~/.syntropic137/secrets/`, inside the 0700 directory: the PEM 0644 (the API container reads it as a non-root user), the webhook and client secrets created 0600
 7. Your browser opens the app's installation page so you can choose which repos to grant access
 
 The private key (PEM) is bind-mounted read-only into the containers that need it as a Compose file secret, at `/run/secrets/github_app_private_key`. Installation IDs are resolved dynamically at runtime, so the app can be installed across multiple orgs and repos. Repositories granted to the installation are listed from GitHub on demand, without requiring a webhook URL.
@@ -173,7 +173,7 @@ This repo is the supply chain entry point for every `npx @syntropic137/setup` us
 - **Separate repo from the platform:** compromising the main Syntropic137 repo does not grant npm publish access. The cross-repo dispatch token can trigger workflow runs here but cannot push code, merge PRs, or alter what gets published.
 - **Publish only deploys reviewed code:** npm publish deploys whatever is on `main`. Since the dispatch token has no write access to repository contents, it cannot inject malicious code into the publish pipeline. The only path to `main` is through a human-reviewed PR.
 - **Trusted Publishing (OIDC):** no npm token is stored anywhere. Every published version includes a signed [provenance attestation](https://docs.npmjs.com/generating-provenance-statements) linking it to the exact commit and workflow run. Verify with `npm audit signatures`.
-- **Service secrets in files:** the Postgres, Redis and MinIO passwords and the GitHub App key are separate files (0644 inside a 0700 `secrets/` directory), bind-mounted into containers as Compose file secrets. The gateway password, Anthropic credential, webhook secret and tunnel token live in `.env`, which is 0600.
+- **Service secrets in files:** the Postgres, Redis and MinIO passwords and the GitHub App key are separate files (0644 inside a 0700 `secrets/` directory), bind-mounted into containers as Compose file secrets. The gateway password, Anthropic credential, webhook secret and tunnel token live in `.env`, which `init` creates as 0600.
 - **No auto-publish:** npm releases require a manual `workflow_dispatch` trigger. Template syncs from upstream open a PR but never auto-merge or auto-publish.
 
 ## Contributing
