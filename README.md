@@ -110,9 +110,9 @@ Everything lives in `~/.syntropic137/`:
 │   └── 01-create-databases.sql        # Database schema
 ├── secrets/
 │   ├── db-password.secret             # Postgres password (0644; dir is 0700)
-│   ├── redis-password.secret          # Redis password (chmod 600)
-│   ├── minio-password.secret          # MinIO password (chmod 600)
-│   └── github-app-private-key.pem     # GitHub App private key (chmod 600)
+│   ├── redis-password.secret          # Redis password (0644; dir is 0700)
+│   ├── minio-password.secret          # MinIO password (0644; dir is 0700)
+│   └── github-app-private-key.pem     # GitHub App private key (0644; dir is 0700)
 └── workspaces/                        # Agent workspace mount
 ```
 
@@ -173,7 +173,7 @@ This repo is the supply chain entry point for every `npx @syntropic137/setup` us
 - **Separate repo from the platform:** compromising the main Syntropic137 repo does not grant npm publish access. The cross-repo dispatch token can trigger workflow runs here but cannot push code, merge PRs, or alter what gets published.
 - **Publish only deploys reviewed code:** npm publish deploys whatever is on `main`. Since the dispatch token has no write access to repository contents, it cannot inject malicious code into the publish pipeline. The only path to `main` is through a human-reviewed PR.
 - **Trusted Publishing (OIDC):** no npm token is stored anywhere. Every published version includes a signed [provenance attestation](https://docs.npmjs.com/generating-provenance-statements) linking it to the exact commit and workflow run. Verify with `npm audit signatures`.
-- **Secrets never in .env:** passwords and keys are stored as separate files (chmod 600) and mounted as Docker secrets (tmpfs-backed, never on the container filesystem).
+- **Secrets never in .env:** passwords and keys are stored as separate files (0644 inside a 0700 `secrets/` directory) and mounted as Docker secrets (tmpfs-backed, never on the container filesystem).
 - **No auto-publish:** npm releases require a manual `workflow_dispatch` trigger. Template syncs from upstream open a PR but never auto-merge or auto-publish.
 
 ## Contributing
