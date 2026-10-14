@@ -60,7 +60,7 @@ The CLI embeds template files (`docker-compose.syntropic137.yaml`, `selfhost-ent
 
 ## Code Security
 
-- **Zero runtime dependencies** — Node 18+ stdlib only (`node:http`, `node:https`,
+- **Zero runtime dependencies** — Node 20.12+ stdlib only (`node:http`, `node:https`,
   `node:crypto`, `node:fs`, `node:child_process`, `node:readline`)
 - **TypeScript strict mode** — `"strict": true` in tsconfig, no `any` types
 - **Secret files live in a 0700 directory** - the `secrets/` directory is owner-only (0700), so no other host user can reach them. The files compose mounts into containers (generated passwords, GitHub App PEM) are 0644 inside it, because the containers read them as non-root users (#78); backups (`*.bak`) and non-mounted GitHub secrets stay 0600

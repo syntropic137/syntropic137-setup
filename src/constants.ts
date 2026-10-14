@@ -125,10 +125,14 @@ export const CLIENT_SECRET_FILE = "github-client-secret.txt";
 export const SKILLS_CLI_VERSION = "1.7.0";
 export const SKILLS_CLI_PACKAGE = `skills@${SKILLS_CLI_VERSION}`;
 /**
- * Oldest Node the pinned skills CLI runs on. It declares >=22.20 but runs on
- * 20.x; Node 18 fails at import (`node:util` has no `styleText` before 20.12).
+ * Oldest Node setup supports, checked before any command runs. It is the
+ * floor of the pinned skills CLI, which declares >=22.20 but runs on 20.x;
+ * Node 18 fails at import (`node:util` has no `styleText` before 20.12).
+ * Keep in step with `engines.node` in package.json and the CI matrix.
  */
-export const SKILLS_CLI_MIN_NODE: readonly [number, number] = [20, 12];
+export const MIN_NODE: readonly [number, number] = [20, 12];
+/** Oldest Node the pinned skills CLI runs on (the setup floor). */
+export const SKILLS_CLI_MIN_NODE: readonly [number, number] = MIN_NODE;
 /** GitHub source of the Syntropic137 agent skills. */
 export const SKILLS_REPO = "syntropic137/syntropic137-skills";
 

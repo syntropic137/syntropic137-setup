@@ -51,6 +51,7 @@ import {
   GITHUB_BASE,
   GITHUB_SLUG_RE,
   GITHUB_WEBHOOK_PATH,
+  MIN_NODE,
 } from "./constants.js";
 import { PKG_DIR, TEMPLATES_DIR, syncTemplate } from "./templates.js";
 import { SkillsManager, defaultRunner, skillsRemoveArgs } from "./skills.js";
@@ -1436,7 +1437,22 @@ export async function runInit(opts: CliOptions): Promise<void> {
 // Main
 // ---------------------------------------------------------------------------
 
+/** Why this Node cannot run setup, or null when it can. */
+export function nodeVersionProblem(version: string = process.versions.node): string | null {
+  const [major = 0, minor = 0] = version.split(".").map(Number);
+  const [minMajor, minMinor] = MIN_NODE;
+  if (major > minMajor || (major === minMajor && minor >= minMinor)) return null;
+  return `Syntropic137 setup needs Node ${minMajor}.${minMinor} or newer; this is Node ${version}. Install a current LTS from https://nodejs.org (or \`nvm install --lts\`) and run it again.`;
+}
+
 async function main(): Promise<void> {
+  // Fail before any step: on an older Node, init used to get halfway (the
+  // agent skills step needs 20.12) before anything said so.
+  const problem = nodeVersionProblem();
+  if (problem) {
+    fail(problem);
+    process.exit(1);
+  }
   await new CLI(process.argv).run();
 }
 

@@ -6,7 +6,7 @@ Zero-dependency self-host setup CLI for [Syntropic137](https://github.com/syntro
 npx @syntropic137/setup init
 ```
 
-**Prerequisites:** Node 18+ and Docker (with Compose v2.20+). That's it.
+**Prerequisites:** Node 20.12+ and Docker (with Compose v2.20+). That's it. On an older Node, setup stops at once and says so.
 
 ## What it does
 
@@ -169,7 +169,7 @@ Optional: Cloudflare Tunnel (set `COMPOSE_PROFILES=tunnel` in `.env` for remote 
 
 This repo is the supply chain entry point for every `npx @syntropic137/setup` user. It is deliberately isolated from the main platform repo. See [SECURITY.md](./SECURITY.md) for the full threat model.
 
-- **Zero runtime dependencies:** Node 18+ stdlib only. Nothing to hijack in the dependency tree.
+- **Zero runtime dependencies:** Node 20.12+ stdlib only. Nothing to hijack in the dependency tree.
 - **Separate repo from the platform:** compromising the main Syntropic137 repo does not grant npm publish access. The cross-repo dispatch token can trigger workflow runs here but cannot push code, merge PRs, or alter what gets published.
 - **Publish only deploys reviewed code:** npm publish deploys whatever is on `main`. Since the dispatch token has no write access to repository contents, it cannot inject malicious code into the publish pipeline. The only path to `main` is through a human-reviewed PR.
 - **Trusted Publishing (OIDC):** no npm token is stored anywhere. Every published version includes a signed [provenance attestation](https://docs.npmjs.com/generating-provenance-statements) linking it to the exact commit and workflow run. Verify with `npm audit signatures`.
