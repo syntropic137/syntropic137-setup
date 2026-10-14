@@ -361,7 +361,8 @@ export class InitFlow {
   private async installCli(): Promise<boolean> {
     if (this.opts.installCli === false) {
       info(`Skipped (--no-install-cli). Install later: ${CMD.cli}`);
-      return InitFlow.getInstalledCliVersion() !== null;
+      const present = InitFlow.getInstalledCliVersion();
+      return present !== null && cliMatchesPlatform(present);
     }
     const targetRange = `~${PLATFORM_VERSION}`; // same major.minor, patch >= platform
     const installed = InitFlow.getInstalledCliVersion();
@@ -475,7 +476,7 @@ export function firstRunActions(state: {
   }
   if (!state.hasGithubApp) {
     out.push(
-      `No GitHub App, so workflows cannot clone repos. Adding one later without resetting the stack is not supported yet (syntropic137/syntropic137-setup#85): before you run anything, re-run ${CMD.init}${state.dirArg ?? ""} without --skip-github and choose to reconfigure`,
+      `No GitHub App, so workflows cannot clone repos. Adding one to an existing install is not supported yet (syntropic137/syntropic137-setup#85). A brand-new install with nothing to keep can start over: ${CMD.reset}${state.dirArg ?? ""} --yes, then ${CMD.init}${state.dirArg ?? ""} (this discards the install's data)`,
     );
   }
   if (!state.cliInstalled) out.push(`Install the syn CLI: ${CMD.cli}`);
@@ -502,6 +503,13 @@ export function isThisInstall(url: string, port: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** Major.minor of the syn CLI must match the platform; patch drift is allowed. */
+export function cliMatchesPlatform(installed: string, platform: string = PLATFORM_VERSION): boolean {
+  const [iMajor, iMinor] = installed.split(".").map(Number);
+  const [pMajor, pMinor] = platform.split(".").map(Number);
+  return iMajor === pMajor && iMinor === pMinor;
 }
 
 /** True when we can prompt the user. */

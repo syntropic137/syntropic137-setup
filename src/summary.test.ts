@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { renderBox, summaryLines, visibleLength, wrapWords } from "./ui.js";
-import { firstRunActions, isThisInstall, shellQuote } from "./cli.js";
+import { cliMatchesPlatform, firstRunActions, isThisInstall, shellQuote } from "./cli.js";
 import { BIN, COMMANDS, GITHUB_WEBHOOK_PATH } from "./constants.js";
 
 const base = { healthy: true, port: "8137", installDir: "/Users/someone/.syntropic137", showCredentials: true, skillsInstalled: true };
@@ -128,5 +128,34 @@ describe("wrapWords", () => {
     const without = renderBox(summaryLines(base));
     const withLong = renderBox(summaryLines({ ...base, actions: ["word ".repeat(60).trim()] }));
     expect(visibleLength(withLong[0]!)).toBe(visibleLength(without[0]!));
+  });
+});
+
+describe("GitHub App first-run action", () => {
+  // Codex review of #84: reconfiguring runs `compose down -v`, so the summary
+  // must not steer an existing install there.
+  it("never recommends reconfiguring, and says what starting over costs", () => {
+    const [line] = firstRunActions({
+      hasAnthropicCredential: true,
+      hasGithubApp: false,
+      cliInstalled: true,
+      envPath: "/x/.env",
+      port: "8137",
+      synApiUrl: undefined,
+    });
+    expect(line).not.toMatch(/reconfigure/i);
+    expect(line).toContain("#85");
+    expect(line).toContain("discards");
+  });
+});
+
+describe("cliMatchesPlatform", () => {
+  it.each([
+    ["1.0.0", "1.0.0", true],
+    ["1.0.7", "1.0.0", true],
+    ["1.1.0", "1.0.0", false],
+    ["0.33.1", "1.0.0", false],
+  ])("%s vs %s", (installed, platform, expected) => {
+    expect(cliMatchesPlatform(installed, platform)).toBe(expected);
   });
 });

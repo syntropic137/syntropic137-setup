@@ -110,7 +110,13 @@ export function spinner(msg: string): Spinner {
 // Prompts (node:readline — no dependencies)
 // ---------------------------------------------------------------------------
 
+/** stdin already reached EOF: no listener attached now will ever hear from it. */
+function stdinEnded(): boolean {
+  return process.stdin.readableEnded || process.stdin.destroyed;
+}
+
 export function prompt(question: string, defaultValue?: string): Promise<string> {
+  if (stdinEnded()) return Promise.resolve(defaultValue || "");
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
@@ -133,6 +139,7 @@ export function prompt(question: string, defaultValue?: string): Promise<string>
 }
 
 export function promptSecret(question: string): Promise<string> {
+  if (stdinEnded()) return Promise.resolve("");
   return new Promise((resolve) => {
     const stdin = process.stdin;
     const wasRaw = stdin.isRaw;
