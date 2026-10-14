@@ -2,6 +2,7 @@
 
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { execFileSync } from "node:child_process";
 import type { CliOptions, EnvValues, SkillsAction } from "./types.js";
@@ -51,7 +52,18 @@ import {
   GITHUB_SLUG_RE,
 } from "./constants.js";
 import { PKG_DIR, TEMPLATES_DIR, syncTemplate } from "./templates.js";
-import { SkillsManager, defaultRunner } from "./skills.js";
+import { SkillsManager, defaultRunner, skillsRemoveArgs } from "./skills.js";
+import {
+  ResetRefusal,
+  defaultSyncRunner,
+  executeReset,
+  executionBlocker,
+  planReset,
+  printGithubAppNote,
+  printPlan,
+  printResults,
+  type ResetPlan,
+} from "./reset.js";
 
 // ---------------------------------------------------------------------------
 // Version & paths
@@ -487,6 +499,10 @@ export class CLI {
       case "credentials":
         await this.credentials(dir, this.opts.credentialsAction);
         break;
+
+      case "reset":
+        await this.reset(dir);
+        break;
     }
   }
 
@@ -535,6 +551,63 @@ export class CLI {
     // and also picks up skills added upstream since the last install.
     const outcome = await manager.install();
     if (outcome !== "installed") process.exitCode = 1;
+  }
+
+  // ── Factory reset ────────────────────────────────────────────────────
+
+  private async reset(dir: string): Promise<void> {
+    const execute = this.opts.yes ?? false;
+    let plan: ResetPlan;
+    try {
+      plan = await planReset(
+        {
+          installDir: dir,
+          backup: !this.opts.noBackup,
+          images: this.opts.images ?? false,
+          cli: this.opts.cli ?? false,
+          skills: this.opts.skills ?? false,
+        },
+        {
+          run: defaultSyncRunner,
+          listSkills: async () => {
+            const installed = await newSkillsManager(this.opts).listInstalled();
+            return installed ? installed.map((s) => s.name) : null;
+          },
+          homedir: os.homedir(),
+          now: new Date(),
+        },
+      );
+    } catch (err) {
+      if (err instanceof ResetRefusal) {
+        fail(err.message);
+        process.exit(1);
+      }
+      throw err;
+    }
+
+    printPlan(plan, execute);
+    const blocker = execute ? executionBlocker(plan) : null;
+    if (blocker) {
+      console.log();
+      fail(blocker);
+      info("Nothing was removed.");
+      process.exit(1);
+    }
+    if (!execute) {
+      printGithubAppNote(plan);
+      console.log();
+      info(`Dry run: nothing was removed. Re-run with ${bold("--yes")} to reset.`);
+      return;
+    }
+
+    console.log();
+    const results = await executeReset(plan, {
+      run: defaultSyncRunner,
+      removeSkills: (names) => defaultRunner("npx", skillsRemoveArgs(names), 600_000),
+    });
+    const ok = printResults(results, plan);
+    printGithubAppNote(plan);
+    if (!ok) process.exitCode = 1;
   }
 
   // ── GitHub App management ────────────────────────────────────────────
@@ -1025,7 +1098,7 @@ export class CLI {
       process.exit(0);
     }
 
-    const subcommands = ["init", "status", "stop", "start", "logs", "update", "skills", "plugin", "github-app", "tunnel", "cli", "credentials", "help"] as const;
+    const subcommands = ["init", "status", "stop", "start", "logs", "update", "skills", "plugin", "github-app", "tunnel", "cli", "credentials", "reset", "help"] as const;
     type Subcommand = (typeof subcommands)[number];
     const firstArg = args[0];
     let command: CliOptions["command"] = "menu";
@@ -1062,17 +1135,39 @@ export class CLI {
       if (action !== undefined && isAction(action)) opts.skillsAction = action;
     }
 
-    for (let i = 0; i < args.length; i++) {
-      const arg = args[i]!;
+    // `--flag=value` is the same as `--flag value`.
+    const flags = args.flatMap((a) => {
+      const eq = a.indexOf("=");
+      return a.startsWith("--") && eq > 0 && CLI.VALUE_FLAGS.has(a.slice(0, eq)) ? [a.slice(0, eq), a.slice(eq + 1)] : [a];
+    });
+    const valueOf = (i: number, flag: string): string => {
+      const v = flags[i];
+      if (v === undefined || v === "" || v.startsWith("-")) {
+        fail(`${flag} needs a value.`);
+        process.exit(1);
+      }
+      return v;
+    };
+    // reset is destructive: an argument it does not understand is an error,
+    // never something to ignore.
+    const RESET_FLAGS = new Set(["--dir", "--yes", "-y", "--no-backup", "--images", "--cli", "--skills", "--all"]);
+
+    for (let i = 0; i < flags.length; i++) {
+      const arg = flags[i]!;
+      if (command === "reset" && i > 0 && !RESET_FLAGS.has(arg)) {
+        fail(`Unknown reset argument: ${arg}`);
+        info(`Usage: ${CMD.reset} [--yes] [--no-backup] [--images] [--cli] [--skills] [--all] [--dir <path>]`);
+        process.exit(1);
+      }
       switch (arg) {
         case "--org":
-          opts.org = args[++i];
+          opts.org = valueOf(++i, arg);
           break;
         case "--name":
-          opts.name = args[++i];
+          opts.name = valueOf(++i, arg);
           break;
         case "--dir":
-          opts.dir = args[++i];
+          opts.dir = valueOf(++i, arg);
           break;
         case "--skip-github":
           opts.skipGithub = true;
@@ -1081,11 +1176,28 @@ export class CLI {
           opts.skipDocker = true;
           break;
         case "--webhook-url":
-          opts.webhookUrl = args[++i];
+          opts.webhookUrl = valueOf(++i, arg);
           break;
         case "--yes":
         case "-y":
           opts.yes = true;
+          break;
+        case "--no-backup":
+          opts.noBackup = true;
+          break;
+        case "--images":
+          opts.images = true;
+          break;
+        case "--cli":
+          opts.cli = true;
+          break;
+        case "--skills":
+          opts.skills = true;
+          break;
+        case "--all":
+          opts.images = true;
+          opts.cli = true;
+          opts.skills = true;
           break;
       }
     }
@@ -1135,6 +1247,14 @@ ${usageLines}
                           in a non-interactive init, removing the legacy plugin)
     -h, --help            Show this help
     -v, --version         Show version
+
+  ${bold("RESET OPTIONS")} ${dim("(reset is a dry run until you add --yes)")}
+    --yes                 Actually remove what the dry run lists
+    --no-backup           Delete the install dir instead of moving it to a backup
+    --images              Also remove ghcr.io/syntropic137/* images
+    --cli                 Also uninstall the syn CLI (npm uninstall -g)
+    --skills              Also remove the Syntropic137 agent skills
+    --all                 --images --cli --skills
 `);
   }
 

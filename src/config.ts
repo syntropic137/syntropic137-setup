@@ -8,7 +8,7 @@ import { success } from "./ui.js";
 // ---------------------------------------------------------------------------
 
 /** Parse a .env-style file into key-value pairs. */
-function parseEnv(content: string): Record<string, string> {
+export function parseEnv(content: string): Record<string, string> {
   const result: Record<string, string> = {};
   for (const line of content.split("\n")) {
     const trimmed = line.trim();

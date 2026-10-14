@@ -53,6 +53,7 @@ npx @syntropic137/setup logs         # Tail container logs
 npx @syntropic137/setup update       # Pull latest images and restart
 npx @syntropic137/setup credentials  # View, rotate, or roll back credentials
 npx @syntropic137/setup skills       # Install or update the agent skills (also: skills status)
+npx @syntropic137/setup reset        # Factory reset (dry run until you add --yes)
 ```
 
 All commands accept `--dir <path>` if your install directory isn't the default `~/.syntropic137`.
@@ -112,7 +113,35 @@ Everything lives in `~/.syntropic137/`:
 └── workspaces/                        # Agent workspace mount
 ```
 
-To uninstall: `docker compose -f ~/.syntropic137/docker-compose.syntropic137.yaml down -v && rm -rf ~/.syntropic137`
+To uninstall, use `reset` (below).
+
+## Factory reset
+
+`reset` returns the machine to a fresh state so the next `init` starts from nothing. It is a dry run by default: it lists exactly what it would remove and removes nothing.
+
+```sh
+npx @syntropic137/setup reset               # dry run: show what would be removed
+npx @syntropic137/setup reset --yes         # do it
+npx @syntropic137/setup reset --all --yes   # also images, the syn CLI and the agent skills
+```
+
+| Target | Selected by | What happens |
+|--------|-------------|--------------|
+| Install directory | always | moved first to `<dir>.backup-YYYYMMDD-HHMMSS` (chmod 700, it holds your secrets); `--no-backup` deletes it last, and only if the Docker cleanup succeeded |
+| Selfhost compose project | always | containers, networks and volumes labelled `com.docker.compose.project=syntropic137_selfhost`, removed by name |
+| `ghcr.io/syntropic137/*` images | `--images` | `docker image rm` |
+| syn CLI | `--cli` | `npm uninstall -g @syntropic137/cli` |
+| Agent skills | `--skills` | removes the Syntropic137 skills with the pinned `skills` CLI; your other skills are untouched |
+
+`--all` is `--images --cli --skills`. `--dir <path>` resets a non-default install.
+
+Safety rails:
+
+- Only resources labelled with the `syntropic137_selfhost` compose project are touched. Reset refuses to run if the installed compose file names a different project, and it never runs `docker compose down`.
+- Reset refuses the filesystem root, your home directory (or anything containing it), a symlink, and any existing directory that has neither the Syntropic137 compose file nor the selfhost `.env` that `init` writes.
+- If the backup cannot be made, nothing is removed. If Docker is not running, `--yes` refuses rather than strand the stack's containers and volumes. If a Docker listing fails, reset stops instead of guessing.
+- Unknown arguments and a `--dir` without a value are errors, never ignored.
+- **The GitHub App on github.com is never touched.** Reset prints its settings URL so you can delete it (Advanced, then Delete GitHub App), or keep the backup to reuse it: the private key stays in `<backup>/secrets/`.
 
 ## The stack
 
