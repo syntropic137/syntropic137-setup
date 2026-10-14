@@ -118,6 +118,17 @@ describe("parseArgs", () => {
     expect(parseArgs(["node", "cli", "skills", "update"]).skillsAction).toBe("update");
     expect(parseArgs(["node", "cli", "skills", "status"]).skillsAction).toBe("status");
     expect(parseArgs(["node", "cli", "skills", "--yes"]).skillsAction).toBeUndefined();
+    expect(parseArgs(["node", "cli", "skills", "--yes", "status"]).skillsAction).toBe("status");
+    expect(parseArgs(["node", "cli", "skills", "--dir", "/x", "update"]).skillsAction).toBe("update");
+  });
+
+  it("rejects unknown or surplus skills actions", () => {
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`exit ${code}`);
+    }) as never);
+    expect(() => parseArgs(["node", "cli", "skills", "bogus"])).toThrow("exit 1");
+    expect(() => parseArgs(["node", "cli", "skills", "status", "extra"])).toThrow("exit 1");
+    exit.mockRestore();
   });
 
   it("parses --yes and -y", () => {
@@ -215,21 +226,20 @@ describe("runInit --skip-docker --skip-github", () => {
 describe("runInit agent skills step", () => {
   beforeEach(() => skillsInstall.mockReset());
 
-  it("installs the agent skills", async () => {
+  it("installs the agent skills with --yes", async () => {
     skillsInstall.mockResolvedValue("installed");
-    await runInit({ command: "init", dir: tmpDir, skipDocker: true, skipGithub: true });
+    await runInit({ command: "init", dir: tmpDir, skipDocker: true, skipGithub: true, yes: true });
     expect(skillsInstall).toHaveBeenCalledTimes(1);
+  });
+
+  it("skips the global install without a terminal or --yes", async () => {
+    await runInit({ command: "init", dir: tmpDir, skipDocker: true, skipGithub: true });
+    expect(skillsInstall).not.toHaveBeenCalled();
   });
 
   it("finishes setup when the skills install fails", async () => {
     skillsInstall.mockResolvedValue("failed");
-    await runInit({ command: "init", dir: tmpDir, skipDocker: true, skipGithub: true });
-    expect(fs.existsSync(path.join(tmpDir, ".env"))).toBe(true);
-  });
-
-  it("finishes setup when no agent is installed", async () => {
-    skillsInstall.mockResolvedValue("no-agents");
-    await runInit({ command: "init", dir: tmpDir, skipDocker: true, skipGithub: true });
+    await runInit({ command: "init", dir: tmpDir, skipDocker: true, skipGithub: true, yes: true });
     expect(fs.existsSync(path.join(tmpDir, ".env"))).toBe(true);
   });
 });

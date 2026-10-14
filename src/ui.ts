@@ -414,6 +414,8 @@ export function summaryBox(opts: {
   installDir: string;
   showCredentials?: boolean;
   apiUser?: string;
+  /** Whether the agent skills ended up installed during this run. */
+  skillsInstalled?: boolean;
 }): void {
   const width = 78;
   console.log();
@@ -438,7 +440,11 @@ export function summaryBox(opts: {
 
   console.log(boxLine("", width));
   console.log(boxLine(dim("  Next steps:"), width));
-  console.log(boxLine(`    ${bold("1.")} Open Claude Code or Codex (the Syntropic137 skills are ready)`, width));
+  if (opts.skillsInstalled) {
+    console.log(boxLine(`    ${bold("1.")} Open Claude Code or Codex (the Syntropic137 skills are ready)`, width));
+  } else {
+    console.log(boxLine(`    ${bold("1.")} Install the agent skills: ${cyan(`${BIN} skills`)}, then open Claude Code or Codex`, width));
+  }
   console.log(boxLine(`    ${bold("2.")} Say: ${cyan('"Add the default Syntropic137 marketplace workflows"')}`, width));
   console.log(boxLine(`    ${bold("3.")} Say: ${cyan('"Run code-review on my latest PR"')}`, width));
 

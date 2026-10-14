@@ -38,6 +38,7 @@ npx @syntropic137/setup init [options]
 --skip-github         Skip GitHub App creation
 --skip-docker         Skip image pull and container startup (templates only)
 --webhook-url <url>   Set a webhook URL for the GitHub App
+-y, --yes             Answer yes instead of asking (e.g. install the agent skills without a terminal)
 ```
 
 ## Lifecycle commands
@@ -72,9 +73,9 @@ Under the hood this runs the [`skills`](https://www.npmjs.com/package/skills) CL
 npx -y skills@1.7.0 add syntropic137/syntropic137-skills --skill '*' -g -a claude-code -a codex -y
 ```
 
-A failed skills install never stops `init`; it prints a warning and this command instead.
+The skills CLI needs Node 20.12 or newer. A failed skills install never stops `init`; it prints a warning and this command instead. Without a terminal to ask in, `init` skips the skills unless you pass `--yes`.
 
-**Upgrading from the Claude Code plugin:** earlier versions installed a Claude Code plugin (`syntropic137@syntropic137`). The skills replace it, and keeping both duplicates commands. The `skills` step detects the plugin and offers to run `claude plugin uninstall syntropic137@syntropic137` and `claude plugin marketplace remove syntropic137` for you. Without a terminal to ask in, it only prints those commands unless you pass `--yes`. The old `plugin` subcommand still works as a deprecated alias for `skills`.
+**Upgrading from the Claude Code plugin:** earlier versions installed a Claude Code plugin (`syntropic137@syntropic137`). The skills replace it, and keeping both duplicates commands. The `skills` step detects the plugin and offers to run `claude plugin uninstall syntropic137@syntropic137` and `claude plugin marketplace remove syntropic137` for you, but only after the skills installed successfully. Without a terminal to ask in, it only prints those commands unless you pass `--yes`. The old `plugin` subcommand still works as a deprecated alias for `skills`.
 
 ## How the GitHub App Manifest flow works
 

@@ -14,6 +14,8 @@ import {
   formatCommand,
   manualInstallCommand,
   marketplaceListHasLegacy,
+  nodeSupportsSkillsCli,
+  onPath,
   parseInstalledSkills,
   pluginListHasLegacy,
   skillsAddArgs,
@@ -31,22 +33,19 @@ interface Call { cmd: string; args: readonly string[] }
 
 /** Fake machine: which binaries exist, and canned output per command. */
 function fakeRunner(opts: {
-  bins?: string[];
   pluginList?: string;
   marketplaceList?: string;
   add?: CommandResult;
   list?: CommandResult;
 }): { run: CommandRunner; calls: Call[] } {
   const calls: Call[] = [];
-  const bins = new Set(opts.bins ?? []);
   const run: CommandRunner = async (cmd, args) => {
     calls.push({ cmd, args });
-    if (args[0] === "--version") return bins.has(cmd) ? ok("1.0.0") : bad("ENOENT");
     if (cmd === "claude" && args.join(" ") === "plugin list") return ok(opts.pluginList ?? "");
     if (cmd === "claude" && args.join(" ") === "plugin marketplace list") return ok(opts.marketplaceList ?? "");
     if (cmd === "claude") return ok();
     if (cmd === "npx" && args[2] === "add") return opts.add ?? ok();
-    if (cmd === "npx" && args[2] === "ls") return opts.list ?? ok("[]");
+    if (cmd === "npx" && args[2] === "ls") return opts.list ?? ok(LIST_JSON);
     return bad(`unexpected ${cmd} ${args.join(" ")}`);
   };
   return { run, calls };
@@ -58,9 +57,20 @@ const LIST_JSON = JSON.stringify([
   { name: "frontend-design", path: "/h/.agents/skills/frontend-design", source: "someone/else" },
 ]);
 
-function manager(run: CommandRunner, o: { interactive?: boolean; assumeYes?: boolean; answer?: boolean } = {}) {
+function manager(
+  run: CommandRunner,
+  o: { bins?: string[]; node?: string; interactive?: boolean; assumeYes?: boolean; answer?: boolean } = {},
+) {
   const confirm = vi.fn().mockResolvedValue(o.answer ?? true);
-  const m = new SkillsManager({ run, confirm, interactive: o.interactive ?? false, assumeYes: o.assumeYes ?? false });
+  const bins = new Set(o.bins ?? []);
+  const m = new SkillsManager({
+    run,
+    locate: (bin) => bins.has(bin),
+    nodeVersion: o.node ?? "22.17.1",
+    confirm,
+    interactive: o.interactive ?? false,
+    assumeYes: o.assumeYes ?? false,
+  });
   return { m, confirm };
 }
 
@@ -121,10 +131,12 @@ describe("parsing", () => {
   });
 });
 
+const BOTH = ["claude", "codex"];
+
 describe("SkillsManager.install", () => {
   it("installs for both agents when claude and codex are present", async () => {
-    const { run, calls } = fakeRunner({ bins: ["claude", "codex"], list: ok(LIST_JSON) });
-    const { m } = manager(run);
+    const { run, calls } = fakeRunner({});
+    const { m } = manager(run, { bins: BOTH });
     expect(await m.install()).toBe("installed");
     const add = calls.find((c) => c.cmd === "npx" && c.args[2] === "add");
     expect(add?.args).toEqual(skillsAddArgs(SKILLS_AGENTS));
@@ -132,35 +144,48 @@ describe("SkillsManager.install", () => {
   });
 
   it("installs for codex only when claude is missing, and skips the plugin check", async () => {
-    const { run, calls } = fakeRunner({ bins: ["codex"] });
-    const { m } = manager(run);
+    const { run, calls } = fakeRunner({});
+    const { m } = manager(run, { bins: ["codex"] });
     expect(await m.install()).toBe("installed");
     const add = calls.find((c) => c.cmd === "npx" && c.args[2] === "add");
     expect(add?.args).not.toContain("claude-code");
-    expect(calls.some((c) => c.cmd === "claude" && c.args[0] === "plugin")).toBe(false);
+    expect(calls.some((c) => c.cmd === "claude")).toBe(false);
   });
 
   it("explains and prints the manual command when no agent is installed", async () => {
-    const { run, calls } = fakeRunner({ bins: [] });
-    const { m } = manager(run);
+    const { run, calls } = fakeRunner({});
+    const { m } = manager(run, { bins: [] });
     expect(await m.install()).toBe("no-agents");
     expect(calls.some((c) => c.cmd === "npx")).toBe(false);
     expect(allOutput()).toContain(manualInstallCommand());
   });
 
+  it("refuses to run the skills CLI on a Node it cannot run on", async () => {
+    const { run, calls } = fakeRunner({});
+    const { m } = manager(run, { bins: BOTH, node: "18.20.8" });
+    expect(await m.install()).toBe("unsupported-node");
+    expect(calls.some((c) => c.cmd === "npx")).toBe(false);
+    expect(allOutput()).toContain("Node 20.12 or newer");
+  });
+
   it("warns with the manual command instead of throwing when the install fails", async () => {
-    const { run } = fakeRunner({ bins: ["claude"], add: bad("network down") });
-    const { m } = manager(run);
+    const { run } = fakeRunner({ add: bad("network down") });
+    const { m } = manager(run, { bins: ["claude"] });
     expect(await m.install()).toBe("failed");
     const out = allOutput();
     expect(out).toContain("network down");
     expect(out).toContain(`--skill '*' -g -a claude-code -y`);
   });
+
+  it("treats exit 0 with no skills on disk as a failure", async () => {
+    const { run } = fakeRunner({ list: ok("[]") });
+    const { m } = manager(run, { bins: BOTH });
+    expect(await m.install()).toBe("failed");
+  });
 });
 
 describe("legacy plugin migration", () => {
   const legacy = {
-    bins: ["claude"],
     pluginList: "  ❯ syntropic137@syntropic137\n",
     marketplaceList: "  ❯ syntropic137\n    Source: GitHub (syntropic137/syntropic137-claude-plugin)\n",
   };
@@ -168,27 +193,39 @@ describe("legacy plugin migration", () => {
     calls.filter((c) => c.cmd === "claude" && (c.args[1] === "uninstall" || c.args[2] === "remove"));
 
   it("does nothing when the plugin is absent", async () => {
-    const { run, calls } = fakeRunner({ bins: ["claude"] });
-    const { m, confirm } = manager(run, { interactive: true });
+    const { run, calls } = fakeRunner({});
+    const { m, confirm } = manager(run, { bins: ["claude"], interactive: true });
     await m.install();
     expect(confirm).not.toHaveBeenCalled();
     expect(removals(calls)).toHaveLength(0);
   });
 
-  it("uninstalls plugin and marketplace when the user agrees", async () => {
+  it("uninstalls plugin and marketplace after the skills are installed, when the user agrees", async () => {
     const { run, calls } = fakeRunner(legacy);
-    const { m, confirm } = manager(run, { interactive: true, answer: true });
+    const { m, confirm } = manager(run, { bins: ["claude"], interactive: true, answer: true });
     await m.install();
     expect(confirm).toHaveBeenCalledTimes(1);
     expect(removals(calls).map((c) => c.args.join(" "))).toEqual([
       "plugin uninstall syntropic137@syntropic137",
       "plugin marketplace remove syntropic137",
     ]);
+    const addAt = calls.findIndex((c) => c.cmd === "npx" && c.args[2] === "add");
+    const firstRemoval = calls.findIndex((c) => c.cmd === "claude" && c.args[1] === "uninstall");
+    expect(addAt).toBeGreaterThanOrEqual(0);
+    expect(firstRemoval).toBeGreaterThan(addAt);
+  });
+
+  it("never removes the plugin when the skills install failed", async () => {
+    const { run, calls } = fakeRunner({ ...legacy, add: bad("offline") });
+    const { m, confirm } = manager(run, { bins: ["claude"], interactive: true, assumeYes: true });
+    expect(await m.install()).toBe("failed");
+    expect(confirm).not.toHaveBeenCalled();
+    expect(removals(calls)).toHaveLength(0);
   });
 
   it("keeps the plugin and prints the commands when the user declines", async () => {
     const { run, calls } = fakeRunner(legacy);
-    const { m } = manager(run, { interactive: true, answer: false });
+    const { m } = manager(run, { bins: ["claude"], interactive: true, answer: false });
     await m.install();
     expect(removals(calls)).toHaveLength(0);
     expect(allOutput()).toContain("claude plugin uninstall syntropic137@syntropic137");
@@ -196,7 +233,7 @@ describe("legacy plugin migration", () => {
 
   it("never removes without consent in non-interactive mode", async () => {
     const { run, calls } = fakeRunner(legacy);
-    const { m, confirm } = manager(run, { interactive: false });
+    const { m, confirm } = manager(run, { bins: ["claude"], interactive: false });
     await m.install();
     expect(confirm).not.toHaveBeenCalled();
     expect(removals(calls)).toHaveLength(0);
@@ -205,7 +242,7 @@ describe("legacy plugin migration", () => {
 
   it("removes without prompting when --yes was given", async () => {
     const { run, calls } = fakeRunner(legacy);
-    const { m, confirm } = manager(run, { interactive: false, assumeYes: true });
+    const { m, confirm } = manager(run, { bins: ["claude"], interactive: false, assumeYes: true });
     await m.install();
     expect(confirm).not.toHaveBeenCalled();
     expect(removals(calls)).toHaveLength(2);
@@ -214,16 +251,32 @@ describe("legacy plugin migration", () => {
 
 describe("SkillsManager.status", () => {
   it("reports installed skills", async () => {
-    const { run } = fakeRunner({ bins: ["claude", "codex"], list: ok(LIST_JSON) });
-    const { m } = manager(run);
+    const { run } = fakeRunner({});
+    const { m } = manager(run, { bins: BOTH });
     expect(await m.status()).toBe(true);
     expect(allOutput()).toContain("2 Syntropic137 skills installed");
   });
 
   it("returns false and prints the install command when none are installed", async () => {
-    const { run } = fakeRunner({ bins: ["codex"], list: ok("[]") });
-    const { m } = manager(run);
+    const { run } = fakeRunner({ list: ok("[]") });
+    const { m } = manager(run, { bins: ["codex"] });
     expect(await m.status()).toBe(false);
     expect(allOutput()).toContain("No Syntropic137 skills installed");
+  });
+});
+
+describe("environment checks", () => {
+  it("finds executables on PATH without running them", () => {
+    const files = new Set(["/usr/local/bin/claude", "C:\\tools\\codex.CMD"]);
+    const isFile = (p: string) => files.has(p);
+    expect(onPath("claude", { PATH: "/usr/bin:/usr/local/bin" }, "darwin", isFile)).toBe(true);
+    expect(onPath("codex", { PATH: "/usr/bin:/usr/local/bin" }, "darwin", isFile)).toBe(false);
+  });
+
+  it("accepts Node 20.12+ and rejects older", () => {
+    expect(nodeSupportsSkillsCli("18.20.8")).toBe(false);
+    expect(nodeSupportsSkillsCli("20.11.1")).toBe(false);
+    expect(nodeSupportsSkillsCli("20.12.0")).toBe(true);
+    expect(nodeSupportsSkillsCli("22.17.1")).toBe(true);
   });
 });

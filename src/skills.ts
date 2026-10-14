@@ -8,11 +8,14 @@
  */
 
 import { execFile } from "node:child_process";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import {
   LEGACY_PLUGIN_ID,
   LEGACY_PLUGIN_MARKETPLACE,
   LEGACY_PLUGIN_REPO,
   SKILLS_AGENTS,
+  SKILLS_CLI_MIN_NODE,
   SKILLS_CLI_PACKAGE,
   SKILLS_REPO,
   type SkillsAgent,
@@ -42,11 +45,24 @@ const INSTALL_TIMEOUT_MS = 600_000;
 const PROBE_TIMEOUT_MS = 30_000;
 const NPX = "npx";
 
+/**
+ * On Windows `npx` is a .cmd shim, which execFile cannot run without a shell.
+ * Run npm's own npx entry point with the current node instead.
+ */
+function resolveCommand(cmd: string, args: readonly string[]): [string, string[]] {
+  if (process.platform === "win32" && cmd === NPX) {
+    const npxCli = path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npx-cli.js");
+    if (fs.existsSync(npxCli)) return [process.execPath, [npxCli, ...args]];
+  }
+  return [cmd, [...args]];
+}
+
 export const defaultRunner: CommandRunner = (cmd, args, timeoutMs = PROBE_TIMEOUT_MS) =>
   new Promise((resolve) => {
+    const [file, argv] = resolveCommand(cmd, args);
     const child = execFile(
-      cmd,
-      [...args],
+      file,
+      argv,
       { encoding: "utf-8", timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 },
       (err, stdout, stderr) => {
         resolve({
@@ -158,12 +174,41 @@ export function marketplaceListHasLegacy(output: string): boolean {
 // Detection
 // ---------------------------------------------------------------------------
 
-export async function detectAgents(run: CommandRunner): Promise<SkillsAgent[]> {
-  const found: SkillsAgent[] = [];
-  for (const agent of SKILLS_AGENTS) {
-    if ((await run(agent.bin, ["--version"])).ok) found.push(agent);
+/** Is `bin` an executable on PATH? Looks only, never runs it (works for Windows shims). */
+export function onPath(
+  bin: string,
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+  isFile: (p: string) => boolean = defaultIsFile,
+): boolean {
+  const dirs = (env.PATH ?? env.Path ?? "").split(path.delimiter).filter(Boolean);
+  const exts = platform === "win32" ? (env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";").concat([""]) : [""];
+  return dirs.some((d) => exts.some((e) => isFile(path.join(d, bin + e.toLowerCase())) || isFile(path.join(d, bin + e))));
+}
+
+function defaultIsFile(p: string): boolean {
+  try {
+    const st = fs.statSync(p);
+    if (!st.isFile()) return false;
+    if (process.platform === "win32") return true;
+    fs.accessSync(p, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
   }
-  return found;
+}
+
+export type AgentLocator = (bin: string) => boolean;
+
+export function detectAgents(locate: AgentLocator = onPath): SkillsAgent[] {
+  return SKILLS_AGENTS.filter((a) => locate(a.bin));
+}
+
+/** True when this Node can run the pinned skills CLI. */
+export function nodeSupportsSkillsCli(version: string = process.versions.node): boolean {
+  const [major = 0, minor = 0] = version.split(".").map(Number);
+  const [minMajor, minMinor] = SKILLS_CLI_MIN_NODE;
+  return major > minMajor || (major === minMajor && minor >= minMinor);
 }
 
 export interface LegacyPluginState {
@@ -199,6 +244,10 @@ function tail(result: CommandResult, lines = 6): string[] {
 
 export interface SkillsDeps {
   run: CommandRunner;
+  /** Is this agent binary on PATH? Defaults to a PATH lookup. */
+  locate?: AgentLocator;
+  /** Node version the skills CLI will run under. Defaults to this process. */
+  nodeVersion?: string;
   confirm: (question: string, defaultYes?: boolean) => Promise<boolean>;
   /** True when we may prompt the user. */
   interactive: boolean;
@@ -206,7 +255,7 @@ export interface SkillsDeps {
   assumeYes: boolean;
 }
 
-export type InstallOutcome = "installed" | "no-agents" | "failed";
+export type InstallOutcome = "installed" | "no-agents" | "unsupported-node" | "failed";
 
 export class SkillsManager {
   constructor(private readonly deps: SkillsDeps) {}
@@ -216,7 +265,7 @@ export class SkillsManager {
    * agent. Never throws: failures become a warning plus the manual command.
    */
   async install(): Promise<InstallOutcome> {
-    const agents = await detectAgents(this.deps.run);
+    const agents = this.agents();
     if (agents.length === 0) {
       warn("Neither Claude Code (`claude`) nor Codex (`codex`) was found on your PATH.");
       info("The Syntropic137 skills teach your coding agent to drive the platform.");
@@ -225,8 +274,13 @@ export class SkillsManager {
       return "no-agents";
     }
 
-    if (agents.some((a) => a.id === "claude-code")) {
-      await this.migrateLegacyPlugin();
+    const nodeVersion = this.deps.nodeVersion ?? process.versions.node;
+    if (!nodeSupportsSkillsCli(nodeVersion)) {
+      const [maj, min] = SKILLS_CLI_MIN_NODE;
+      warn(`The skills CLI needs Node ${maj}.${min} or newer; this is Node ${nodeVersion}.`);
+      info(`Upgrade Node, then run:`);
+      info(`  ${bold(formatCommand(NPX, skillsAddArgs(agents)))}`);
+      return "unsupported-node";
     }
 
     const labels = agents.map((a) => a.label).join(" and ");
@@ -237,7 +291,9 @@ export class SkillsManager {
     const result = await this.deps.run(NPX, skillsAddArgs(agents), INSTALL_TIMEOUT_MS);
     spin?.stop();
 
-    if (!result.ok) {
+    // Exit 0 is not proof: confirm the skills are actually there.
+    const installed = result.ok ? await this.listInstalled() : null;
+    if (!result.ok || !installed || installed.length === 0) {
       warn(`Could not install the Syntropic137 skills for ${labels}.`);
       for (const line of tail(result)) info(dim(line));
       info("Install manually:");
@@ -245,18 +301,23 @@ export class SkillsManager {
       return "failed";
     }
 
-    const installed = await this.listInstalled();
-    const count = installed ? ` (${installed.length} skills)` : "";
-    success(`Syntropic137 skills installed for ${labels}${count}`);
-    if (installed && installed.length > 0) {
-      info(dim(installed.map((s) => s.name).join(", ")));
+    success(`Syntropic137 skills installed for ${labels} (${installed.length} skills)`);
+    info(dim(installed.map((s) => s.name).join(", ")));
+
+    // Only offer to remove the old plugin once its replacement is in place.
+    if (agents.some((a) => a.id === "claude-code")) {
+      await this.migrateLegacyPlugin();
     }
     return "installed";
   }
 
+  private agents(): SkillsAgent[] {
+    return detectAgents(this.deps.locate ?? onPath);
+  }
+
   /** Print what is installed, which agents were found, and any legacy plugin. */
   async status(): Promise<boolean> {
-    const agents = await detectAgents(this.deps.run);
+    const agents = this.agents();
     for (const a of SKILLS_AGENTS) {
       const found = agents.some((x) => x.id === a.id);
       if (found) success(`${a.label} found (\`${a.bin}\`)`);

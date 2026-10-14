@@ -275,7 +275,7 @@ export class InitFlow {
 
     // ── Step 7: Agent skills (Claude Code + Codex) ──────────────────────
     step("Agent skills");
-    await this.installSkills();
+    const skillsInstalled = await this.installSkills();
 
     // ── Step 8: Syntropic137 CLI ─────────────────────────────────────────
     step("Syntropic137 CLI");
@@ -306,7 +306,7 @@ export class InitFlow {
     const healthy = await docker.waitForHealth(port);
 
     // ── Summary ─────────────────────────────────────────────────────────
-    summaryBox({ healthy, port, installDir: this.installDir, showCredentials: true });
+    summaryBox({ healthy, port, installDir: this.installDir, showCredentials: true, skillsInstalled });
   }
 
   // ── Private ───────────────────────────────────────────────────────────
@@ -368,17 +368,30 @@ export class InitFlow {
     }
   }
 
-  private async installSkills(): Promise<void> {
+  /** Returns true when the skills ended up installed. Never fails the setup. */
+  private async installSkills(): Promise<boolean> {
     info("Teaches Claude Code and Codex to drive Syntropic137 (workflows, runs, sessions).");
-    if (isInteractive()) {
+    if (!this.opts.yes) {
+      if (!isInteractive()) {
+        // No terminal to ask in: global installs need explicit consent (--yes).
+        info(`Skipped (non-interactive). Install later: ${CMD.skills}`);
+        return false;
+      }
       const proceed = await confirm("Install the Syntropic137 agent skills? (recommended)");
       if (!proceed) {
         info("Skipped. Install later: " + CMD.skills);
-        return;
+        return false;
       }
     }
-    // Never fails the setup: problems surface as a warning and the manual command.
-    await newSkillsManager(this.opts).install();
+    // Problems surface as a warning and the manual command, never an exception.
+    try {
+      return (await newSkillsManager(this.opts).install()) === "installed";
+    } catch (err) {
+      warn("Could not install the Syntropic137 agent skills.");
+      if (err instanceof Error) info(err.message);
+      info(`Install later: ${CMD.skills}`);
+      return false;
+    }
   }
 }
 
@@ -1033,16 +1046,18 @@ export class CLI {
       }
     }
 
-    // Parse sub-action for `skills` command
-    if (command === "skills" && args[1] && !args[1].startsWith("-")) {
-      const secondArg = args[1];
-      if (secondArg === "install" || secondArg === "update" || secondArg === "status") {
-        opts.skillsAction = secondArg;
-      } else {
-        fail(`Unknown skills action: ${secondArg}`);
+    // Parse sub-action for `skills` command: the positionals after the
+    // command, wherever the flags sit (`skills --yes status` is `status`).
+    if (command === "skills") {
+      const positionals = CLI.positionals(args.slice(1));
+      const action = positionals[0];
+      const isAction = (a: string): a is SkillsAction => a === "install" || a === "update" || a === "status";
+      if (positionals.length > 1 || (action !== undefined && !isAction(action))) {
+        fail(`Unknown skills action: ${positionals.join(" ")}`);
         info(`Usage: ${CMD.skills} [install|update|status]`);
         process.exit(1);
       }
+      if (action !== undefined && isAction(action)) opts.skillsAction = action;
     }
 
     for (let i = 0; i < args.length; i++) {
@@ -1076,6 +1091,21 @@ export class CLI {
     return opts;
   }
 
+  /** Flags that consume the next argument as their value. */
+  private static readonly VALUE_FLAGS = new Set(["--org", "--name", "--dir", "--webhook-url"]);
+
+  /** Non-flag arguments, skipping flags and the values they consume. */
+  static positionals(args: readonly string[]): string[] {
+    const out: string[] = [];
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i]!;
+      if (CLI.VALUE_FLAGS.has(a)) { i++; continue; }
+      if (a.startsWith("-")) continue;
+      out.push(a);
+    }
+    return out;
+  }
+
   private static printHelp(): void {
     // Build usage lines dynamically from COMMANDS
     const usage = COMMANDS.map((c) => ({
@@ -1099,8 +1129,8 @@ ${usageLines}
     --skip-github         Skip GitHub App creation
     --skip-docker         Skip Docker pull/up (templates only)
     --webhook-url <url>   Webhook URL for the GitHub App
-    -y, --yes             Answer yes instead of asking (e.g. removing the legacy
-                          Claude Code plugin during \`skills\`)
+    -y, --yes             Answer yes instead of asking (installing the agent skills
+                          in a non-interactive init, removing the legacy plugin)
     -h, --help            Show this help
     -v, --version         Show version
 `);
