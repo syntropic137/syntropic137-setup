@@ -65,7 +65,7 @@ export const COMMANDS: readonly CommandDef[] = [
   { name: "logs",        description: "Tail container logs" },
   { name: "update",      description: "Pull latest images and restart" },
   { name: "cli",         description: "Install or update the Syntropic137 CLI" },
-  { name: "plugin",      description: "Install or update the Claude Code plugin" },
+  { name: "skills",      description: "Install, update, or check the agent skills", args: "[install|update|status]" },
   { name: "github-app",  description: "Open GitHub App settings in your browser" },
   { name: "tunnel",      description: "Set up remote access (Cloudflare tunnel)" },
   { name: "credentials", description: "View, rotate, or roll back service credentials", args: "[show|rotate|rollback]" },
@@ -103,13 +103,44 @@ export const WEBHOOK_SECRET_FILE = "github-webhook-secret.txt";
 export const CLIENT_SECRET_FILE = "github-client-secret.txt";
 
 // ---------------------------------------------------------------------------
-// Claude Code plugin
+// Agent skills (installed with the `skills` CLI for Claude Code and Codex)
 // ---------------------------------------------------------------------------
 
-export const CLAUDE_PLUGIN_REPO = "syntropic137/syntropic137-claude-plugin";
-export const CLAUDE_PLUGIN_NAME = "syntropic137";
-/** Full name@source used by `claude plugin update` */
-export const CLAUDE_PLUGIN_FULL = "syntropic137@syntropic137";
+/** Exact `skills` CLI release we run through npx. Bump on purpose, never float. */
+export const SKILLS_CLI_VERSION = "1.7.0";
+export const SKILLS_CLI_PACKAGE = `skills@${SKILLS_CLI_VERSION}`;
+/**
+ * Oldest Node the pinned skills CLI runs on. It declares >=22.20 but runs on
+ * 20.x; Node 18 fails at import (`node:util` has no `styleText` before 20.12).
+ */
+export const SKILLS_CLI_MIN_NODE: readonly [number, number] = [20, 12];
+/** GitHub source of the Syntropic137 agent skills. */
+export const SKILLS_REPO = "syntropic137/syntropic137-skills";
+
+export interface SkillsAgent {
+  /** Agent id understood by `skills add -a <id>`. */
+  readonly id: string;
+  /** Binary we probe on PATH to decide whether the agent is installed. */
+  readonly bin: string;
+  /** Human-readable name. */
+  readonly label: string;
+}
+
+export const SKILLS_AGENTS: readonly SkillsAgent[] = [
+  { id: "claude-code", bin: "claude", label: "Claude Code" },
+  { id: "codex", bin: "codex", label: "Codex" },
+] as const;
+
+// ---------------------------------------------------------------------------
+// Legacy Claude Code plugin (replaced by the agent skills above)
+// ---------------------------------------------------------------------------
+
+/** Marketplace name the old setup registered with `claude plugin marketplace add`. */
+export const LEGACY_PLUGIN_MARKETPLACE = "syntropic137";
+/** Repo the old marketplace pointed at. */
+export const LEGACY_PLUGIN_REPO = "syntropic137/syntropic137-claude-plugin";
+/** Full plugin id (`name@marketplace`) the old setup installed. */
+export const LEGACY_PLUGIN_ID = "syntropic137@syntropic137";
 
 // ---------------------------------------------------------------------------
 // GitHub

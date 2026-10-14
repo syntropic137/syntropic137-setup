@@ -52,6 +52,15 @@ vi.mock("./manifest.js", () => ({
   openBrowser: vi.fn(),
 }));
 
+// Agent skills: never run npx against the real machine from a test
+vi.mock("./skills.js", () => ({
+  defaultRunner: vi.fn(),
+  SkillsManager: vi.fn().mockImplementation(() => ({
+    install: vi.fn().mockResolvedValue("installed"),
+    status: vi.fn().mockResolvedValue(true),
+  })),
+}));
+
 vi.mock("node:child_process", () => ({
   execFileSync: vi.fn().mockReturnValue(Buffer.from("")),
   execSync: vi.fn().mockReturnValue(Buffer.from("")),
