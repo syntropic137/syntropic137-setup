@@ -393,7 +393,7 @@ export function setupOverview(opts: {
   if (!opts.skipGithub) {
     console.log(boxLine(`    ${cyan("5.")} Set up GitHub App integration`, width));
   }
-  console.log(boxLine(`    ${cyan(opts.skipGithub ? "5." : "6.")} Install Claude Code plugin ${dim("(prompted)")}`, width));
+  console.log(boxLine(`    ${cyan(opts.skipGithub ? "5." : "6.")} Install agent skills for Claude Code and Codex ${dim("(prompted)")}`, width));
   console.log(boxLine(`    ${cyan(opts.skipGithub ? "6." : "7.")} Install syn CLI ${dim("(prompted)")}`, width));
   if (!opts.skipDocker) {
     console.log(boxLine(`    ${cyan(opts.skipGithub ? "7." : "8.")} Pull images, start stack, and health check`, width));
@@ -438,7 +438,7 @@ export function summaryBox(opts: {
 
   console.log(boxLine("", width));
   console.log(boxLine(dim("  Next steps:"), width));
-  console.log(boxLine(`    ${bold("1.")} Open Claude Code (if you installed the plugin, it's ready)`, width));
+  console.log(boxLine(`    ${bold("1.")} Open Claude Code or Codex (the Syntropic137 skills are ready)`, width));
   console.log(boxLine(`    ${bold("2.")} Say: ${cyan('"Add the default Syntropic137 marketplace workflows"')}`, width));
   console.log(boxLine(`    ${bold("3.")} Say: ${cyan('"Run code-review on my latest PR"')}`, width));
 

@@ -43,6 +43,16 @@ vi.mock("./docker.js", () => ({
   parseComposeVersion: vi.fn(),
 }));
 
+// Mock agent skills: never run npx or touch the real ~/.claude / ~/.agents
+const { skillsInstall } = vi.hoisted(() => ({ skillsInstall: vi.fn() }));
+vi.mock("./skills.js", () => ({
+  defaultRunner: vi.fn(),
+  SkillsManager: vi.fn().mockImplementation(() => ({
+    install: skillsInstall,
+    status: vi.fn().mockResolvedValue(true),
+  })),
+}));
+
 // Mock manifest flow — returns fake credentials
 vi.mock("./manifest.js", () => {
   const result = {
@@ -95,10 +105,25 @@ describe("parseArgs", () => {
     expect(parseArgs(["node", "cli", "start"]).command).toBe("start");
     expect(parseArgs(["node", "cli", "logs"]).command).toBe("logs");
     expect(parseArgs(["node", "cli", "update"]).command).toBe("update");
+    expect(parseArgs(["node", "cli", "skills"]).command).toBe("skills");
     expect(parseArgs(["node", "cli", "plugin"]).command).toBe("plugin");
     expect(parseArgs(["node", "cli", "github-app"]).command).toBe("github-app");
     expect(parseArgs(["node", "cli", "tunnel"]).command).toBe("tunnel");
     expect(parseArgs(["node", "cli", "cli"]).command).toBe("cli");
+  });
+
+  it("parses skills sub-actions, defaulting to install", () => {
+    expect(parseArgs(["node", "cli", "skills"]).skillsAction).toBeUndefined();
+    expect(parseArgs(["node", "cli", "skills", "install"]).skillsAction).toBe("install");
+    expect(parseArgs(["node", "cli", "skills", "update"]).skillsAction).toBe("update");
+    expect(parseArgs(["node", "cli", "skills", "status"]).skillsAction).toBe("status");
+    expect(parseArgs(["node", "cli", "skills", "--yes"]).skillsAction).toBeUndefined();
+  });
+
+  it("parses --yes and -y", () => {
+    expect(parseArgs(["node", "cli", "skills", "--yes"]).yes).toBe(true);
+    expect(parseArgs(["node", "cli", "skills", "install", "-y"]).yes).toBe(true);
+    expect(parseArgs(["node", "cli", "skills"]).yes).toBeUndefined();
   });
 
   it("parses all flags", () => {
@@ -184,6 +209,28 @@ describe("runInit --skip-docker --skip-github", () => {
     const match = content.match(/^SYN_INSTALL_DIR=(.+)$/m);
     expect(match).not.toBeNull();
     expect(path.isAbsolute(match![1]!)).toBe(true);
+  });
+});
+
+describe("runInit agent skills step", () => {
+  beforeEach(() => skillsInstall.mockReset());
+
+  it("installs the agent skills", async () => {
+    skillsInstall.mockResolvedValue("installed");
+    await runInit({ command: "init", dir: tmpDir, skipDocker: true, skipGithub: true });
+    expect(skillsInstall).toHaveBeenCalledTimes(1);
+  });
+
+  it("finishes setup when the skills install fails", async () => {
+    skillsInstall.mockResolvedValue("failed");
+    await runInit({ command: "init", dir: tmpDir, skipDocker: true, skipGithub: true });
+    expect(fs.existsSync(path.join(tmpDir, ".env"))).toBe(true);
+  });
+
+  it("finishes setup when no agent is installed", async () => {
+    skillsInstall.mockResolvedValue("no-agents");
+    await runInit({ command: "init", dir: tmpDir, skipDocker: true, skipGithub: true });
+    expect(fs.existsSync(path.join(tmpDir, ".env"))).toBe(true);
   });
 });
 

@@ -18,7 +18,7 @@ The `init` command walks you through a 12-step interactive setup:
 4. **Generate secrets:** creates cryptographically random passwords for Postgres, Redis, and MinIO (chmod 600)
 5. **Configure LLM provider:** prompts for your Anthropic API key (or picks up `ANTHROPIC_API_KEY` from your environment)
 6. **GitHub App setup:** runs the [GitHub App Manifest flow](https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest) to create a GitHub App with the right permissions in one click (optional, skippable)
-7. **Claude Code plugin:** installs the Syntropic137 plugin for Claude Code (optional, skippable)
+7. **Agent skills:** installs the [Syntropic137 agent skills](https://github.com/syntropic137/syntropic137-skills) globally for Claude Code and Codex, whichever you have (optional, skippable)
 8. **Syntropic137 CLI:** installs the `syn` CLI for managing workflows and executions (optional, skippable)
 9. **Write .env:** renders the final configuration from your answers
 10. **Pull images:** `docker compose pull` from GHCR
@@ -51,9 +51,30 @@ npx @syntropic137/setup start        # Start the stack
 npx @syntropic137/setup logs         # Tail container logs
 npx @syntropic137/setup update       # Pull latest images and restart
 npx @syntropic137/setup credentials  # View, rotate, or roll back credentials
+npx @syntropic137/setup skills       # Install or update the agent skills (also: skills status)
 ```
 
 All commands accept `--dir <path>` if your install directory isn't the default `~/.syntropic137`.
+
+## Agent skills (Claude Code and Codex)
+
+The [Syntropic137 agent skills](https://github.com/syntropic137/syntropic137-skills) teach your coding agent to drive the platform: run workflows, follow executions, read sessions, and set up GitHub triggers. `init` offers to install them, and you can manage them any time:
+
+```sh
+npx @syntropic137/setup skills          # install for every agent found (claude, codex)
+npx @syntropic137/setup skills update   # refresh to the latest skills
+npx @syntropic137/setup skills status   # what is installed, and where
+```
+
+Under the hood this runs the [`skills`](https://www.npmjs.com/package/skills) CLI, pinned to an exact version, as a user-level (global) install. It detects `claude` and `codex` on your `PATH` and installs for whichever you have. To run it yourself:
+
+```sh
+npx -y skills@1.7.0 add syntropic137/syntropic137-skills --skill '*' -g -a claude-code -a codex -y
+```
+
+A failed skills install never stops `init`; it prints a warning and this command instead.
+
+**Upgrading from the Claude Code plugin:** earlier versions installed a Claude Code plugin (`syntropic137@syntropic137`). The skills replace it, and keeping both duplicates commands. The `skills` step detects the plugin and offers to run `claude plugin uninstall syntropic137@syntropic137` and `claude plugin marketplace remove syntropic137` for you. Without a terminal to ask in, it only prints those commands unless you pass `--yes`. The old `plugin` subcommand still works as a deprecated alias for `skills`.
 
 ## How the GitHub App Manifest flow works
 
