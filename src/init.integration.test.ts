@@ -44,9 +44,10 @@ vi.mock("./docker.js", () => ({
 }));
 
 // Mock agent skills: never run npx or touch the real ~/.claude / ~/.agents
-const { skillsInstall } = vi.hoisted(() => ({ skillsInstall: vi.fn() }));
+const { skillsInstall, onPathMock } = vi.hoisted(() => ({ skillsInstall: vi.fn(), onPathMock: vi.fn() }));
 vi.mock("./skills.js", () => ({
   defaultRunner: vi.fn(),
+  onPath: onPathMock,
   SkillsManager: vi.fn().mockImplementation(() => ({
     install: skillsInstall,
     status: vi.fn().mockResolvedValue(true),
@@ -83,9 +84,42 @@ vi.mock("node:child_process", () => ({
   spawn: vi.fn(),
 }));
 
-import { parseArgs, runInit } from "./cli.js";
-import { confirm, promptSecret } from "./ui.js";
-import { GITHUB_SLUG_RE } from "./constants.js";
+// Templates are copied for real. A test can stand in a compose file "synced
+// from a newer platform" (one that forwards OPENAI_API_KEY, #1971): the copy
+// runs, then the override replaces what landed in the install.
+const { composeOverride } = vi.hoisted(() => ({ composeOverride: { text: null as string | null } }));
+vi.mock("./templates.js", async () => {
+  const actual = await vi.importActual<typeof import("./templates.js")>("./templates.js");
+  return {
+    ...actual,
+    syncTemplate: (tplDir: string, installDir: string, relativePath: string) => {
+      actual.syncTemplate(tplDir, installDir, relativePath);
+      if (relativePath === "docker-compose.syntropic137.yaml" && composeOverride.text !== null) {
+        fs.writeFileSync(path.join(installDir, relativePath), composeOverride.text);
+      }
+    },
+  };
+});
+
+import { CLI, parseArgs, runInit } from "./cli.js";
+import { confirm, promptSecret, summaryBox } from "./ui.js";
+import { ENV_KEYS, GITHUB_SLUG_RE } from "./constants.js";
+import { parseEnv } from "./config.js";
+import { info } from "./ui.js";
+import { TEMPLATES_DIR } from "./templates.js";
+
+/** The vendored compose template, as shipped. */
+const vendoredCompose = () => fs.readFileSync(path.join(TEMPLATES_DIR, "docker-compose.syntropic137.yaml"), "utf-8");
+/** The vendored template once synced from a platform that forwards OPENAI_API_KEY (#1971). */
+const composeWithOpenAIKey = () =>
+  vendoredCompose().replace(/^(\s+)CODEX_AUTH_JSON: \$\{CODEX_AUTH_JSON:-\}$/m, "$&\n$1OPENAI_API_KEY: ${OPENAI_API_KEY:-}");
+/** Make the next init copy this compose file into the install (and leave it for the codex command). */
+function seedCompose(_dir: string, text: string): void {
+  composeOverride.text = text;
+}
+afterEach(() => {
+  composeOverride.text = null;
+});
 
 let tmpDir: string;
 
@@ -318,7 +352,8 @@ describe("runInit credential step without a terminal", () => {
 
   it("still prompts when there is a terminal", async () => {
     await withTerminal(() => runInit({ command: "init", dir: tmpDir, skipDocker: true, skipGithub: true }));
-    expect(promptSecret).toHaveBeenCalledTimes(1);
+    const anthropicPrompts = vi.mocked(promptSecret).mock.calls.filter((c) => String(c[0]).includes("Anthropic"));
+    expect(anthropicPrompts).toHaveLength(1);
     const env = fs.readFileSync(path.join(tmpDir, ".env"), "utf-8");
     expect(env).toMatch(/^ANTHROPIC_API_KEY=sk-ant-test-key-123$/m);
   });
@@ -444,5 +479,186 @@ describe("GITHUB_SLUG_RE", () => {
     expect(GITHUB_SLUG_RE.test("foo bar")).toBe(false);
     expect(GITHUB_SLUG_RE.test("foo;rm -rf")).toBe(false);
     expect(GITHUB_SLUG_RE.test("")).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Codex credential step (#92)
+// ---------------------------------------------------------------------------
+
+describe("runInit Codex step", () => {
+  // Invented values only.
+  const OPENAI_KEY = "sk-proj-INVENTED-integration-key-00000000";
+  const planAuth = { auth_mode: "chatgpt", tokens: { access_token: "eyINVENTED", refresh_token: "rt_INVENTED_integration", account_id: "acct" } };
+  const readEnvFile = () => parseEnv(fs.readFileSync(path.join(tmpDir, ".env"), "utf-8"));
+  const authFile = () => {
+    const f = path.join(tmpDir + "-codex", "auth.json");
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    fs.writeFileSync(f, JSON.stringify(planAuth, null, 2));
+    return f;
+  };
+
+  beforeEach(() => {
+    onPathMock.mockReset();
+    onPathMock.mockReturnValue(false);
+    vi.mocked(promptSecret).mockClear();
+    vi.mocked(summaryBox).mockClear();
+  });
+  afterEach(() => {
+    fs.rmSync(tmpDir + "-codex", { recursive: true, force: true });
+    delete process.env.S137_TEST_OPENAI_KEY;
+  });
+
+  it("parses the Codex flags, including --flag=value", () => {
+    const o = parseArgs(["node", "cli", "init", "--codex-auth-file=/a/auth.json", "--yes"]);
+    expect(o.codexAuthFile).toBe("/a/auth.json");
+    expect(parseArgs(["node", "cli", "init", "--openai-api-key-env", "MY_KEY"]).openaiApiKeyEnv).toBe("MY_KEY");
+    expect(parseArgs(["node", "cli", "init", "--skip-codex"]).skipCodex).toBe(true);
+    expect(parseArgs(["node", "cli", "codex", "--openai-api-key-env", "MY_KEY"]).command).toBe("codex");
+  });
+
+  it("refuses two Codex sources at once", () => {
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`exit ${code}`);
+    }) as never);
+    expect(() => parseArgs(["node", "cli", "init", "--codex-auth-file", "/a", "--openai-api-key-env", "K"])).toThrow("exit 1");
+    expect(() => parseArgs(["node", "cli", "init", "--skip-codex", "--codex-auth-file", "/a"])).toThrow("exit 1");
+    exit.mockRestore();
+  });
+
+  it("--codex-auth-file writes CODEX_AUTH_JSON as one line to the 0600 .env, and nothing else", async () => {
+    await runInit({ command: "init", dir: tmpDir, skipDocker: true, skipGithub: true, codexAuthFile: authFile() });
+    const raw = fs.readFileSync(path.join(tmpDir, ".env"), "utf-8");
+    const line = raw.split("\n").find((l) => l.startsWith(`${ENV_KEYS.CODEX_AUTH_JSON}=`));
+    expect(line).toBeDefined();
+    expect(JSON.parse(readEnvFile()[ENV_KEYS.CODEX_AUTH_JSON]!)).toEqual(planAuth);
+    expect(readEnvFile()[ENV_KEYS.OPENAI_API_KEY]).toBeUndefined();
+    expect(fs.statSync(path.join(tmpDir, ".env")).mode & 0o777).toBe(0o600);
+  });
+
+  it("--openai-api-key-env writes OPENAI_API_KEY when the compose file forwards it", async () => {
+    process.env.S137_TEST_OPENAI_KEY = OPENAI_KEY;
+    seedCompose(tmpDir, composeWithOpenAIKey());
+    await runInit({ command: "init", dir: tmpDir, skipDocker: true, skipGithub: true, openaiApiKeyEnv: "S137_TEST_OPENAI_KEY" });
+    const env = readEnvFile();
+    expect(env[ENV_KEYS.OPENAI_API_KEY]).toBe(OPENAI_KEY);
+    expect(env[ENV_KEYS.CODEX_AUTH_JSON]).toBeUndefined();
+    expect(fs.statSync(path.join(tmpDir, ".env")).mode & 0o777).toBe(0o600);
+  });
+
+  it("--openai-api-key-env with the vendored compose file (no forwarding) stores nothing", async () => {
+    process.env.S137_TEST_OPENAI_KEY = OPENAI_KEY;
+    seedCompose(tmpDir, vendoredCompose());
+    await runInit({ command: "init", dir: tmpDir, skipDocker: true, skipGithub: true, openaiApiKeyEnv: "S137_TEST_OPENAI_KEY" });
+    const env = readEnvFile();
+    expect(env[ENV_KEYS.OPENAI_API_KEY]).toBeUndefined();
+    expect(env[ENV_KEYS.CODEX_AUTH_JSON]).toBeUndefined();
+  });
+
+  it("--skip-docker still reports the Codex outcome", async () => {
+    vi.mocked(info).mockClear();
+    await runInit({ command: "init", dir: tmpDir, skipDocker: true, skipGithub: true, codexAuthFile: authFile() });
+    expect(vi.mocked(info).mock.calls.map((c) => String(c[0]))).toContain("Codex enabled (Codex auth.json).");
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    vi.mocked(info).mockClear();
+    await runInit({ command: "init", dir: tmpDir, skipDocker: true, skipGithub: true });
+    expect(vi.mocked(info).mock.calls.map((c) => String(c[0]))).toContain("Codex skipped. Add it later: npx @syntropic137/setup codex");
+  });
+
+  it("reconfiguring an install whose .env is 0644 leaves it 0600", async () => {
+    fs.mkdirSync(tmpDir, { recursive: true });
+    fs.writeFileSync(path.join(tmpDir, ".env"), "EXISTING=true\n", { mode: 0o644 });
+    fs.chmodSync(path.join(tmpDir, ".env"), 0o644);
+    vi.mocked(confirm).mockResolvedValue(true);
+    await withTerminal(() => runInit({ command: "init", dir: tmpDir, skipDocker: true, skipGithub: true, codexAuthFile: authFile() }));
+    expect(readEnvFile()[ENV_KEYS.CODEX_AUTH_JSON]).toBeDefined();
+    expect(fs.statSync(path.join(tmpDir, ".env")).mode & 0o777).toBe(0o600);
+  });
+
+  it("without a terminal or a flag (even with --yes), writes no Codex credential", async () => {
+    await runInit({ command: "init", dir: tmpDir, skipDocker: true, skipGithub: true, yes: true });
+    const env = readEnvFile();
+    expect(env[ENV_KEYS.CODEX_AUTH_JSON]).toBeUndefined();
+    expect(env[ENV_KEYS.OPENAI_API_KEY]).toBeUndefined();
+  });
+
+  it("in a terminal, asks after the Anthropic credential and stores a pasted key", async () => {
+    onPathMock.mockReturnValue(true);
+    seedCompose(tmpDir, composeWithOpenAIKey());
+    vi.mocked(promptSecret)
+      .mockResolvedValueOnce("sk-ant-test-key-123")
+      .mockResolvedValueOnce(OPENAI_KEY);
+    vi.mocked(confirm).mockClear();
+    await withTerminal(() => runInit({ command: "init", dir: tmpDir, skipDocker: true, skipGithub: true }));
+    const prompts = vi.mocked(promptSecret).mock.calls.map((c) => String(c[0]));
+    expect(prompts).toEqual(["Anthropic credential", "Codex credential"]);
+    expect(vi.mocked(confirm).mock.calls.find((c) => c[0] === "Enable Codex phases?")?.[1]).toBe(true);
+    const env = readEnvFile();
+    expect(env[ENV_KEYS.ANTHROPIC_API_KEY]).toBe("sk-ant-test-key-123");
+    expect(env[ENV_KEYS.OPENAI_API_KEY]).toBe(OPENAI_KEY);
+  });
+
+  it("the summary says which Codex credential, or that it was skipped", async () => {
+    await runInit({ command: "init", dir: tmpDir, skipGithub: true, codexAuthFile: authFile() });
+    expect(vi.mocked(summaryBox).mock.calls[0]![0].codex).toEqual({ enabled: true, kind: "auth-json" });
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    vi.mocked(summaryBox).mockClear();
+    await runInit({ command: "init", dir: tmpDir, skipGithub: true });
+    expect(vi.mocked(summaryBox).mock.calls[0]![0].codex).toEqual({ enabled: false });
+  });
+});
+
+describe("codex command (add or replace later)", () => {
+  const KEY = "sk-proj-INVENTED-command-key-000000000000";
+  afterEach(() => {
+    delete process.env.S137_TEST_OPENAI_KEY;
+    process.exitCode = undefined;
+  });
+
+  it("replaces CODEX_AUTH_JSON with OPENAI_API_KEY, keeps the rest, tightens a 0644 .env to 0600", async () => {
+    seedCompose(tmpDir, composeWithOpenAIKey());
+    process.env.CODEX_AUTH_JSON = JSON.stringify({ auth_mode: "chatgpt", tokens: { refresh_token: "rt_INVENTED_cmd" } });
+    try {
+      await runInit({ command: "init", dir: tmpDir, skipDocker: true, skipGithub: true });
+    } finally {
+      delete process.env.CODEX_AUTH_JSON;
+    }
+    const before = parseEnv(fs.readFileSync(path.join(tmpDir, ".env"), "utf-8"));
+    expect(before[ENV_KEYS.CODEX_AUTH_JSON]).toBeDefined();
+
+    fs.chmodSync(path.join(tmpDir, ".env"), 0o644);
+
+    process.env.S137_TEST_OPENAI_KEY = KEY;
+    await new CLI(["node", "cli", "codex", "--dir", tmpDir, "--openai-api-key-env", "S137_TEST_OPENAI_KEY"]).run();
+
+    const after = parseEnv(fs.readFileSync(path.join(tmpDir, ".env"), "utf-8"));
+    expect(after[ENV_KEYS.OPENAI_API_KEY]).toBe(KEY);
+    expect(after[ENV_KEYS.CODEX_AUTH_JSON]).toBeUndefined();
+    expect(after[ENV_KEYS.SYN_API_PASSWORD]).toBe(before[ENV_KEYS.SYN_API_PASSWORD]);
+    expect(fs.statSync(path.join(tmpDir, ".env")).mode & 0o777).toBe(0o600);
+  });
+
+  it("refuses --skip-codex and leaves .env untouched, even with CODEX_AUTH_JSON exported", async () => {
+    await runInit({ command: "init", dir: tmpDir, skipDocker: true, skipGithub: true });
+    const before = fs.readFileSync(path.join(tmpDir, ".env"), "utf-8");
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`exit ${code}`);
+    }) as never);
+    process.env.CODEX_AUTH_JSON = JSON.stringify({ auth_mode: "chatgpt", tokens: { refresh_token: "rt_INVENTED_skip" } });
+    try {
+      await expect((async () => new CLI(["node", "cli", "codex", "--dir", tmpDir, "--skip-codex"]).run())()).rejects.toThrow("exit 1");
+    } finally {
+      delete process.env.CODEX_AUTH_JSON;
+      exit.mockRestore();
+    }
+    expect(fs.readFileSync(path.join(tmpDir, ".env"), "utf-8")).toBe(before);
+  });
+
+  it("without a terminal or a flag, changes nothing and exits non-zero", async () => {
+    await runInit({ command: "init", dir: tmpDir, skipDocker: true, skipGithub: true });
+    const before = fs.readFileSync(path.join(tmpDir, ".env"), "utf-8");
+    await new CLI(["node", "cli", "codex", "--dir", tmpDir]).run();
+    expect(process.exitCode).toBe(1);
+    expect(fs.readFileSync(path.join(tmpDir, ".env"), "utf-8")).toBe(before);
   });
 });

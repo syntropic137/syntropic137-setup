@@ -24,6 +24,15 @@ describe("summary box", () => {
     }
   });
 
+  it("shows the Codex outcome: the credential kind, or the command to add it", () => {
+    const enabled = summaryLines({ ...base, codex: { enabled: true, kind: "api-key" } }).join("\n");
+    expect(enabled).toMatch(/Codex +enabled \(OpenAI API key\)/);
+    const authJson = summaryLines({ ...base, codex: { enabled: true, kind: "auth-json" } }).join("\n");
+    expect(authJson).toContain("(Codex auth.json)");
+    const skipped = summaryLines({ ...base, codex: { enabled: false } }).join("\n");
+    expect(skipped).toMatch(/Codex +skipped\. Add it later: npx @syntropic137\/setup codex/);
+  });
+
   it("lists first-run actions only when there are some", () => {
     expect(summaryLines(base).join("\n")).not.toContain("Before your first workflow run");
     const text = summaryLines({ ...base, actions: ["Do the thing"] }).join("\n");

@@ -36,6 +36,8 @@ export const ENV_KEYS = {
   APP_ENVIRONMENT: "APP_ENVIRONMENT",
   ANTHROPIC_API_KEY: "ANTHROPIC_API_KEY",
   CLAUDE_CODE_OAUTH_TOKEN: "CLAUDE_CODE_OAUTH_TOKEN",
+  CODEX_AUTH_JSON: "CODEX_AUTH_JSON",
+  OPENAI_API_KEY: "OPENAI_API_KEY",
   SYN_GITHUB_APP_ID: "SYN_GITHUB_APP_ID",
   SYN_GITHUB_APP_NAME: "SYN_GITHUB_APP_NAME",
   SYN_GITHUB_APP_ORG: "SYN_GITHUB_APP_ORG",
@@ -82,6 +84,7 @@ export const COMMANDS: readonly CommandDef[] = [
   { name: "skills",      description: "Install, update, or check the agent skills", args: "[install|update|status]" },
   { name: "github-app",  description: "Open GitHub App settings in your browser" },
   { name: "tunnel",      description: "Set up remote access (Cloudflare tunnel)" },
+  { name: "codex",       description: "Add or replace the Codex credential (codex phases)", args: "[options]" },
   { name: "credentials", description: "View, rotate, or roll back service credentials", args: "[show|rotate|rollback]" },
   { name: "reset",       description: "Factory reset: remove the install (dry run unless --yes)", args: "[options]" },
 ] as const;

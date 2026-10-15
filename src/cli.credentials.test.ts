@@ -55,6 +55,7 @@ vi.mock("./manifest.js", () => ({
 // Agent skills: never run npx against the real machine from a test
 vi.mock("./skills.js", () => ({
   defaultRunner: vi.fn(),
+  onPath: vi.fn().mockReturnValue(false),
   SkillsManager: vi.fn().mockImplementation(() => ({
     install: vi.fn().mockResolvedValue("installed"),
     status: vi.fn().mockResolvedValue(true),

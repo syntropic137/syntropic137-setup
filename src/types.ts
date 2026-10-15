@@ -3,7 +3,7 @@ export type SkillsAction = "install" | "update" | "status";
 
 /** CLI options parsed from argv. */
 export interface CliOptions {
-  command: "init" | "status" | "stop" | "start" | "logs" | "update" | "skills" | "plugin" | "github-app" | "tunnel" | "cli" | "credentials" | "reset" | "menu" | "help";
+  command: "init" | "status" | "stop" | "start" | "logs" | "update" | "skills" | "plugin" | "github-app" | "tunnel" | "cli" | "credentials" | "codex" | "reset" | "menu" | "help";
   /** Sub-action for the `credentials` command. */
   credentialsAction?: "show" | "rotate" | "rollback";
   /** Sub-action for the `skills` command (default: install). */
@@ -26,6 +26,12 @@ export interface CliOptions {
   /** init: `--install-cli` (true) installs the syn CLI without asking, `--no-install-cli` (false) skips it. */
   installCli?: boolean;
   webhookUrl?: string;
+  /** init: `--skip-codex` skips the Codex credential step. */
+  skipCodex?: boolean;
+  /** init, codex: `--codex-auth-file <path>`, a Codex auth.json to store as CODEX_AUTH_JSON. */
+  codexAuthFile?: string;
+  /** init, codex: `--openai-api-key-env <VAR>`, the NAME of an env var holding an OpenAI API key. */
+  openaiApiKeyEnv?: string;
 }
 
 /** Values collected during the init flow and written to .env. */
@@ -37,6 +43,8 @@ export interface EnvValues {
   SYN_API_PASSWORD?: string;
   ANTHROPIC_API_KEY?: string;
   CLAUDE_CODE_OAUTH_TOKEN?: string;
+  CODEX_AUTH_JSON?: string;
+  OPENAI_API_KEY?: string;
   SYN_GITHUB_APP_ID?: string;
   SYN_GITHUB_APP_NAME?: string;
   SYN_GITHUB_APP_ORG?: string;

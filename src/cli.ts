@@ -54,7 +54,15 @@ import {
   MIN_NODE,
 } from "./constants.js";
 import { PKG_DIR, TEMPLATES_DIR, syncTemplate } from "./templates.js";
-import { SkillsManager, defaultRunner, skillsRemoveArgs } from "./skills.js";
+import { SkillsManager, defaultRunner, onPath, skillsRemoveArgs } from "./skills.js";
+import {
+  applyCodexCredential,
+  codexCredentialStep,
+  codexOutcomeText,
+  installForwardsOpenAIKey,
+  type CodexStepDeps,
+} from "./codex.js";
+import type { CodexSummary } from "./ui.js";
 import {
   ResetRefusal,
   defaultSyncRunner,
@@ -78,7 +86,7 @@ const VERSION = _pkg.version as string;
 const PLATFORM_VERSION: string = _pkg.syntropic137?.platformVersion ?? VERSION;
 
 // ---------------------------------------------------------------------------
-// InitFlow — orchestrates the 10-step first-run setup
+// InitFlow: orchestrates the 13-step first-run setup
 // ---------------------------------------------------------------------------
 
 export class InitFlow {
@@ -97,7 +105,7 @@ export class InitFlow {
   }
 
   async run(): Promise<void> {
-    let steps = 12;
+    let steps = 13;
     if (this.opts.skipGithub) steps -= 1;
     if (this.opts.skipDocker) steps -= 3;
     setTotalSteps(steps);
@@ -253,7 +261,29 @@ export class InitFlow {
       }
     }
 
-    // ── Step 6: GitHub App Manifest flow ────────────────────────────────
+    // ── Step 6: Codex credential (optional) ─────────────────────────────
+    // Right after the Claude credential: a fresh install should be able to
+    // run codex phases too (#92). Writes CODEX_AUTH_JSON or OPENAI_API_KEY,
+    // never both, through the same .env write as the Anthropic credential.
+    step("Configuring Codex (optional)");
+    const codex = await codexCredentialStep(
+      {
+        skip: this.opts.skipCodex,
+        authFile: this.opts.codexAuthFile,
+        apiKeyEnv: this.opts.openaiApiKeyEnv,
+        yes: this.opts.yes,
+        askToEnable: true,
+      },
+      codexStepDeps(this.installDir),
+    );
+    if (codex.status === "enabled") {
+      envValues[codex.credential.envKey] = codex.credential.value;
+    }
+    const codexSummary: CodexSummary = codex.status === "enabled"
+      ? { enabled: true, kind: codex.credential.kind }
+      : { enabled: false };
+
+    // ── Step 7: GitHub App Manifest flow ────────────────────────────────
     if (!this.opts.skipGithub) {
       step("Setting up GitHub App");
       console.log();
@@ -304,26 +334,27 @@ export class InitFlow {
       }
     }
 
-    // ── Step 7: Agent skills (Claude Code + Codex) ──────────────────────
+    // ── Step 8: Agent skills (Claude Code + Codex) ──────────────────────
     step("Agent skills");
     const skillsInstalled = await this.installSkills();
 
-    // ── Step 8: Syntropic137 CLI ─────────────────────────────────────────
+    // ── Step 9: Syntropic137 CLI ─────────────────────────────────────────
     step("Syntropic137 CLI");
     const cliInstalled = await this.installCli();
 
-    // ── Step 9: Write .env ──────────────────────────────────────────────
+    // ── Step 10: Write .env ──────────────────────────────────────────────
     step("Writing configuration");
     this.config.writeEnv(envValues, TEMPLATES_DIR);
 
     if (this.opts.skipDocker) {
       console.log();
       success("Templates written to " + this.installDir);
+      info(codexOutcomeText(codexSummary));
       info(`Run \`cd ${this.installDir} && docker compose -f ${COMPOSE_FILE} up -d\` to start.`);
       return;
     }
 
-    // ── Steps 10–12: Docker ──────────────────────────────────────────────
+    // ── Steps 11 to 13: Docker ──────────────────────────────────────────────
     const docker = new DockerService(this.installDir);
 
     step("Pulling container images");
@@ -350,7 +381,7 @@ export class InitFlow {
       port,
       synApiUrl: process.env.SYN_API_URL,
     });
-    summaryBox({ healthy, port, installDir: this.installDir, showCredentials: true, skillsInstalled, actions });
+    summaryBox({ healthy, port, installDir: this.installDir, showCredentials: true, skillsInstalled, actions, codex: codexSummary });
   }
 
   // ── Private ───────────────────────────────────────────────────────────
@@ -519,6 +550,23 @@ function isInteractive(): boolean {
   return Boolean(process.stdin.isTTY && process.stdout.isTTY);
 }
 
+/** Real-world dependencies of the Codex credential step, for this install. */
+function codexStepDeps(installDir: string): CodexStepDeps {
+  return {
+    interactive: isInteractive(),
+    // Read from the install's own compose file: that is what the stack runs.
+    apiKeySupported: installForwardsOpenAIKey(installDir),
+    env: process.env,
+    homedir: os.homedir(),
+    locate: (bin) => onPath(bin),
+    confirm,
+    promptSecret,
+    info,
+    warn,
+    success,
+  };
+}
+
 function newSkillsManager(opts: CliOptions): SkillsManager {
   return new SkillsManager({
     run: defaultRunner,
@@ -609,6 +657,10 @@ export class CLI {
         await this.credentials(dir, this.opts.credentialsAction);
         break;
 
+      case "codex":
+        await this.codex(dir);
+        break;
+
       case "reset":
         await this.reset(dir);
         break;
@@ -660,6 +712,44 @@ export class CLI {
     // and also picks up skills added upstream since the last install.
     const outcome = await manager.install();
     if (outcome !== "installed") process.exitCode = 1;
+  }
+
+  // ── Codex credential on an existing install ──────────────────────────
+
+  /**
+   * Add or replace the Codex credential in an existing .env: the same step
+   * init runs, without the "Enable Codex phases?" question (running the
+   * command is the answer). Writes one key and removes the other.
+   */
+  private async codex(dir: string): Promise<void> {
+    const installDir = this.resolveDir(dir);
+    const config = new ConfigManager(installDir);
+    if (!config.exists()) {
+      fail(`No .env in ${installDir}.`);
+      info(`Run \`${CMD.init}\` first.`);
+      process.exit(1);
+    }
+    const env = config.readEnv();
+    const current = [ENV_KEYS.CODEX_AUTH_JSON, ENV_KEYS.OPENAI_API_KEY].filter((k) => Boolean(env[k]));
+    if (current.length > 0) info(`This replaces the current Codex credential (${current.join(", ")}).`);
+
+    const result = await codexCredentialStep(
+      {
+        authFile: this.opts.codexAuthFile,
+        apiKeyEnv: this.opts.openaiApiKeyEnv,
+        yes: this.opts.yes,
+        askToEnable: false,
+      },
+      codexStepDeps(installDir),
+    );
+    if (result.status !== "enabled") {
+      info("Nothing changed.");
+      process.exitCode = 1;
+      return;
+    }
+    config.writeEnv(applyCodexCredential(env, result.credential) as EnvValues, TEMPLATES_DIR);
+    const dirArg = path.resolve(dir) !== path.resolve(DEFAULT_INSTALL_DIR) ? ` --dir ${shellQuote(installDir)}` : "";
+    info(`Restart the stack to apply it: ${CMD.start}${dirArg}`);
   }
 
   // ── Factory reset ────────────────────────────────────────────────────
@@ -1170,7 +1260,7 @@ export class CLI {
     // Commands that require a completed init (install dir must exist)
     const requiresInit = new Set([
       "status", "stop", "start", "logs", "update",
-      "credentials", "tunnel", "github-app",
+      "credentials", "tunnel", "github-app", "codex",
     ]);
 
     const menuItems: MenuItem[] = COMMANDS.map((c) => {
@@ -1208,7 +1298,7 @@ export class CLI {
       process.exit(0);
     }
 
-    const subcommands = ["init", "status", "stop", "start", "logs", "update", "skills", "plugin", "github-app", "tunnel", "cli", "credentials", "reset", "help"] as const;
+    const subcommands = ["init", "status", "stop", "start", "logs", "update", "skills", "plugin", "github-app", "tunnel", "cli", "credentials", "codex", "reset", "help"] as const;
     type Subcommand = (typeof subcommands)[number];
     const firstArg = args[0];
     let command: CliOptions["command"] = "menu";
@@ -1294,6 +1384,15 @@ export class CLI {
         case "--webhook-url":
           opts.webhookUrl = valueOf(++i, arg);
           break;
+        case "--skip-codex":
+          opts.skipCodex = true;
+          break;
+        case "--codex-auth-file":
+          opts.codexAuthFile = valueOf(++i, arg);
+          break;
+        case "--openai-api-key-env":
+          opts.openaiApiKeyEnv = valueOf(++i, arg);
+          break;
         case "--yes":
         case "-y":
           opts.yes = true;
@@ -1318,11 +1417,21 @@ export class CLI {
       }
     }
 
+    if (command === "codex" && opts.skipCodex) {
+      fail("--skip-codex does not apply to the codex command, which only adds or replaces the Codex credential. Nothing changed.");
+      process.exit(1);
+    }
+    const codexSources = [opts.skipCodex && "--skip-codex", opts.codexAuthFile !== undefined && "--codex-auth-file", opts.openaiApiKeyEnv !== undefined && "--openai-api-key-env"].filter(Boolean);
+    if (codexSources.length > 1) {
+      fail(`Pass only one of ${codexSources.join(", ")}: setup stores one Codex credential.`);
+      process.exit(1);
+    }
+
     return opts;
   }
 
   /** Flags that consume the next argument as their value. */
-  private static readonly VALUE_FLAGS = new Set(["--org", "--name", "--dir", "--webhook-url"]);
+  private static readonly VALUE_FLAGS = new Set(["--org", "--name", "--dir", "--webhook-url", "--codex-auth-file", "--openai-api-key-env"]);
 
   /** Non-flag arguments, skipping flags and the values they consume. */
   static positionals(args: readonly string[]): string[] {
@@ -1360,9 +1469,18 @@ ${usageLines}
     --skip-docker         Skip Docker pull/up (templates only)
     --install-cli         Install the syn CLI without asking (--no-install-cli skips it)
     --webhook-url <url>   Webhook URL for the GitHub App
+    --codex-auth-file <path>
+                          Store this Codex auth.json as CODEX_AUTH_JSON (init, codex)
+    --openai-api-key-env <VAR>
+                          Store the OpenAI API key held in env var VAR as
+                          OPENAI_API_KEY (init, codex). Takes the variable
+                          name, never the key itself. Only when the install's
+                          compose file forwards OPENAI_API_KEY (syntropic137#1971)
+    --skip-codex          Skip the Codex credential step
     -y, --yes             Answer yes instead of asking (installing the agent skills
                           and the syn CLI in a non-interactive init, removing the
-                          legacy plugin)
+                          legacy plugin, reusing this machine's Codex login
+                          given by --codex-auth-file without a terminal)
     -h, --help            Show this help
     -v, --version         Show version
 

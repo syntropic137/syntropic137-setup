@@ -1,5 +1,6 @@
 import * as readline from "node:readline";
-import { BIN, COMMANDS, DEFAULT_API_USER, ENV_KEYS } from "./constants.js";
+import { BIN, CMD, COMMANDS, DEFAULT_API_USER, ENV_KEYS } from "./constants.js";
+import { codexKindLabel, type CodexCredentialKind } from "./codex.js";
 
 // ---------------------------------------------------------------------------
 // ANSI color helpers (no dependencies)
@@ -415,15 +416,18 @@ export function setupOverview(opts: {
   console.log(boxLine(`    ${cyan("1.")} Check Docker prerequisites`, width));
   console.log(boxLine(`    ${cyan("2.")} Create install directory and copy templates`, width));
   console.log(boxLine(`    ${cyan("3.")} Generate secrets (Postgres, Redis, MinIO)`, width));
-  console.log(boxLine(`    ${cyan("4.")} Configure your LLM provider (API key)`, width));
-  if (!opts.skipGithub) {
-    console.log(boxLine(`    ${cyan("5.")} Set up GitHub App integration`, width));
-  }
-  console.log(boxLine(`    ${cyan(opts.skipGithub ? "5." : "6.")} Install agent skills for Claude Code and Codex ${dim("(prompted)")}`, width));
-  console.log(boxLine(`    ${cyan(opts.skipGithub ? "6." : "7.")} Install syn CLI ${dim("(prompted)")}`, width));
-  if (!opts.skipDocker) {
-    console.log(boxLine(`    ${cyan(opts.skipGithub ? "7." : "8.")} Pull images, start stack, and health check`, width));
-  }
+  const items = [
+    "Check Docker prerequisites",
+    "Create install directory and copy templates",
+    "Generate secrets (Postgres, Redis, MinIO)",
+    "Configure your LLM provider (API key)",
+    `Enable Codex phases: Codex auth.json or OpenAI API key ${dim("(optional)")}`,
+    ...(opts.skipGithub ? [] : ["Set up GitHub App integration"]),
+    `Install agent skills for Claude Code and Codex ${dim("(prompted)")}`,
+    `Install syn CLI ${dim("(prompted)")}`,
+    ...(opts.skipDocker ? [] : ["Pull images, start stack, and health check"]),
+  ];
+  items.forEach((item, i) => console.log(boxLine(`    ${cyan(`${i + 1}.`)} ${item}`, width)));
   console.log(boxLine("", width));
   console.log(boxLine(dim("  Install steps may prompt before proceeding or be skipped automatically."), width));
   console.log(`  ${dim(BOX.bl + BOX.h.repeat(width + 2) + BOX.br)}`);
@@ -482,7 +486,12 @@ export interface SummaryOptions {
   skillsInstalled?: boolean;
   /** Things the user must do before a first workflow run can succeed. */
   actions?: readonly string[];
+  /** Whether init stored a Codex credential, and which kind. */
+  codex?: CodexSummary;
 }
+
+/** The Codex step's outcome, as the summary shows it. */
+export type CodexSummary = { enabled: true; kind: CodexCredentialKind } | { enabled: false };
 
 /** The summary box as lines, without printing. */
 export function summaryLines(opts: SummaryOptions): string[] {
@@ -491,6 +500,11 @@ export function summaryLines(opts: SummaryOptions): string[] {
   out.push("");
   out.push(`  Dashboard   ${cyan(`http://localhost:${opts.port}`)}`);
   out.push(`  Directory   ${dim(opts.installDir)}`);
+  if (opts.codex) {
+    out.push(opts.codex.enabled
+      ? `  Codex       ${green("enabled")} ${dim(`(${codexKindLabel(opts.codex.kind)})`)}`
+      : `  Codex       skipped. Add it later: ${cyan(CMD.codex ?? `${BIN} codex`)}`);
+  }
 
   if (opts.actions && opts.actions.length > 0) {
     out.push("");
