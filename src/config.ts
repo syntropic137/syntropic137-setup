@@ -20,6 +20,9 @@ export function parseEnv(content: string): Record<string, string> {
   return result;
 }
 
+/** Mode of .env on every write: it holds the Anthropic and Codex credentials. */
+export const ENV_FILE_MODE = 0o600;
+
 // ---------------------------------------------------------------------------
 // ConfigManager
 // ---------------------------------------------------------------------------
@@ -55,7 +58,13 @@ export class ConfigManager {
       }
     }
 
-    fs.writeFileSync(this.envPath, template, { mode: 0o600 });
+    // .env holds credentials. writeFileSync applies `mode` only when it
+    // creates the file, so an existing .env (hand-made, or an older install)
+    // would keep a looser mode: tighten it BEFORE the new values land, and
+    // again after, on every write.
+    if (fs.existsSync(this.envPath)) fs.chmodSync(this.envPath, ENV_FILE_MODE);
+    fs.writeFileSync(this.envPath, template, { mode: ENV_FILE_MODE });
+    fs.chmodSync(this.envPath, ENV_FILE_MODE);
     success("Wrote .env");
   }
 

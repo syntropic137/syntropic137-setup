@@ -84,10 +84,42 @@ vi.mock("node:child_process", () => ({
   spawn: vi.fn(),
 }));
 
+// Templates are copied for real. A test can stand in a compose file "synced
+// from a newer platform" (one that forwards OPENAI_API_KEY, #1971): the copy
+// runs, then the override replaces what landed in the install.
+const { composeOverride } = vi.hoisted(() => ({ composeOverride: { text: null as string | null } }));
+vi.mock("./templates.js", async () => {
+  const actual = await vi.importActual<typeof import("./templates.js")>("./templates.js");
+  return {
+    ...actual,
+    syncTemplate: (tplDir: string, installDir: string, relativePath: string) => {
+      actual.syncTemplate(tplDir, installDir, relativePath);
+      if (relativePath === "docker-compose.syntropic137.yaml" && composeOverride.text !== null) {
+        fs.writeFileSync(path.join(installDir, relativePath), composeOverride.text);
+      }
+    },
+  };
+});
+
 import { CLI, parseArgs, runInit } from "./cli.js";
 import { confirm, promptSecret, summaryBox } from "./ui.js";
 import { ENV_KEYS, GITHUB_SLUG_RE } from "./constants.js";
 import { parseEnv } from "./config.js";
+import { info } from "./ui.js";
+import { TEMPLATES_DIR } from "./templates.js";
+
+/** The vendored compose template, as shipped. */
+const vendoredCompose = () => fs.readFileSync(path.join(TEMPLATES_DIR, "docker-compose.syntropic137.yaml"), "utf-8");
+/** The vendored template once synced from a platform that forwards OPENAI_API_KEY (#1971). */
+const composeWithOpenAIKey = () =>
+  vendoredCompose().replace(/^(\s+)CODEX_AUTH_JSON: \$\{CODEX_AUTH_JSON:-\}$/m, "$&\n$1OPENAI_API_KEY: ${OPENAI_API_KEY:-}");
+/** Make the next init copy this compose file into the install (and leave it for the codex command). */
+function seedCompose(_dir: string, text: string): void {
+  composeOverride.text = text;
+}
+afterEach(() => {
+  composeOverride.text = null;
+});
 
 let tmpDir: string;
 
@@ -504,12 +536,42 @@ describe("runInit Codex step", () => {
     expect(fs.statSync(path.join(tmpDir, ".env")).mode & 0o777).toBe(0o600);
   });
 
-  it("--openai-api-key-env writes OPENAI_API_KEY from the named variable", async () => {
+  it("--openai-api-key-env writes OPENAI_API_KEY when the compose file forwards it", async () => {
     process.env.S137_TEST_OPENAI_KEY = OPENAI_KEY;
+    seedCompose(tmpDir, composeWithOpenAIKey());
     await runInit({ command: "init", dir: tmpDir, skipDocker: true, skipGithub: true, openaiApiKeyEnv: "S137_TEST_OPENAI_KEY" });
     const env = readEnvFile();
     expect(env[ENV_KEYS.OPENAI_API_KEY]).toBe(OPENAI_KEY);
     expect(env[ENV_KEYS.CODEX_AUTH_JSON]).toBeUndefined();
+    expect(fs.statSync(path.join(tmpDir, ".env")).mode & 0o777).toBe(0o600);
+  });
+
+  it("--openai-api-key-env with the vendored compose file (no forwarding) stores nothing", async () => {
+    process.env.S137_TEST_OPENAI_KEY = OPENAI_KEY;
+    seedCompose(tmpDir, vendoredCompose());
+    await runInit({ command: "init", dir: tmpDir, skipDocker: true, skipGithub: true, openaiApiKeyEnv: "S137_TEST_OPENAI_KEY" });
+    const env = readEnvFile();
+    expect(env[ENV_KEYS.OPENAI_API_KEY]).toBeUndefined();
+    expect(env[ENV_KEYS.CODEX_AUTH_JSON]).toBeUndefined();
+  });
+
+  it("--skip-docker still reports the Codex outcome", async () => {
+    vi.mocked(info).mockClear();
+    await runInit({ command: "init", dir: tmpDir, skipDocker: true, skipGithub: true, codexAuthFile: authFile() });
+    expect(vi.mocked(info).mock.calls.map((c) => String(c[0]))).toContain("Codex enabled (Codex auth.json).");
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    vi.mocked(info).mockClear();
+    await runInit({ command: "init", dir: tmpDir, skipDocker: true, skipGithub: true });
+    expect(vi.mocked(info).mock.calls.map((c) => String(c[0]))).toContain("Codex skipped. Add it later: npx @syntropic137/setup codex");
+  });
+
+  it("reconfiguring an install whose .env is 0644 leaves it 0600", async () => {
+    fs.mkdirSync(tmpDir, { recursive: true });
+    fs.writeFileSync(path.join(tmpDir, ".env"), "EXISTING=true\n", { mode: 0o644 });
+    fs.chmodSync(path.join(tmpDir, ".env"), 0o644);
+    vi.mocked(confirm).mockResolvedValue(true);
+    await withTerminal(() => runInit({ command: "init", dir: tmpDir, skipDocker: true, skipGithub: true, codexAuthFile: authFile() }));
+    expect(readEnvFile()[ENV_KEYS.CODEX_AUTH_JSON]).toBeDefined();
     expect(fs.statSync(path.join(tmpDir, ".env")).mode & 0o777).toBe(0o600);
   });
 
@@ -522,6 +584,7 @@ describe("runInit Codex step", () => {
 
   it("in a terminal, asks after the Anthropic credential and stores a pasted key", async () => {
     onPathMock.mockReturnValue(true);
+    seedCompose(tmpDir, composeWithOpenAIKey());
     vi.mocked(promptSecret)
       .mockResolvedValueOnce("sk-ant-test-key-123")
       .mockResolvedValueOnce(OPENAI_KEY);
@@ -552,7 +615,8 @@ describe("codex command (add or replace later)", () => {
     process.exitCode = undefined;
   });
 
-  it("replaces CODEX_AUTH_JSON with OPENAI_API_KEY, keeps the rest, keeps 0600", async () => {
+  it("replaces CODEX_AUTH_JSON with OPENAI_API_KEY, keeps the rest, tightens a 0644 .env to 0600", async () => {
+    seedCompose(tmpDir, composeWithOpenAIKey());
     process.env.CODEX_AUTH_JSON = JSON.stringify({ auth_mode: "chatgpt", tokens: { refresh_token: "rt_INVENTED_cmd" } });
     try {
       await runInit({ command: "init", dir: tmpDir, skipDocker: true, skipGithub: true });
@@ -562,6 +626,8 @@ describe("codex command (add or replace later)", () => {
     const before = parseEnv(fs.readFileSync(path.join(tmpDir, ".env"), "utf-8"));
     expect(before[ENV_KEYS.CODEX_AUTH_JSON]).toBeDefined();
 
+    fs.chmodSync(path.join(tmpDir, ".env"), 0o644);
+
     process.env.S137_TEST_OPENAI_KEY = KEY;
     await new CLI(["node", "cli", "codex", "--dir", tmpDir, "--openai-api-key-env", "S137_TEST_OPENAI_KEY"]).run();
 
@@ -570,6 +636,22 @@ describe("codex command (add or replace later)", () => {
     expect(after[ENV_KEYS.CODEX_AUTH_JSON]).toBeUndefined();
     expect(after[ENV_KEYS.SYN_API_PASSWORD]).toBe(before[ENV_KEYS.SYN_API_PASSWORD]);
     expect(fs.statSync(path.join(tmpDir, ".env")).mode & 0o777).toBe(0o600);
+  });
+
+  it("refuses --skip-codex and leaves .env untouched, even with CODEX_AUTH_JSON exported", async () => {
+    await runInit({ command: "init", dir: tmpDir, skipDocker: true, skipGithub: true });
+    const before = fs.readFileSync(path.join(tmpDir, ".env"), "utf-8");
+    const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`exit ${code}`);
+    }) as never);
+    process.env.CODEX_AUTH_JSON = JSON.stringify({ auth_mode: "chatgpt", tokens: { refresh_token: "rt_INVENTED_skip" } });
+    try {
+      await expect((async () => new CLI(["node", "cli", "codex", "--dir", tmpDir, "--skip-codex"]).run())()).rejects.toThrow("exit 1");
+    } finally {
+      delete process.env.CODEX_AUTH_JSON;
+      exit.mockRestore();
+    }
+    expect(fs.readFileSync(path.join(tmpDir, ".env"), "utf-8")).toBe(before);
   });
 
   it("without a terminal or a flag, changes nothing and exits non-zero", async () => {

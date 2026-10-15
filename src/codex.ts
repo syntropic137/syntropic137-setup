@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { CMD, ENV_KEYS } from "./constants.js";
+import { CMD, COMPOSE_FILE, ENV_KEYS } from "./constants.js";
 
 // ---------------------------------------------------------------------------
 // Codex credential: routing and the optional init step (#92)
@@ -45,7 +45,7 @@ const API_KEY_RE = /^sk-[A-Za-z0-9_-]{16,}$/;
 
 /** Route a value that should be an OpenAI API key. */
 export function routeOpenAIApiKey(raw: string): CodexRoute {
-  const value = raw.trim();
+  const value = stripQuotes(raw);
   if (value.startsWith("sk-ant-")) {
     return { ok: false, reason: "That is an Anthropic key (sk-ant-...), not an OpenAI API key." };
   }
@@ -99,18 +99,37 @@ export function expandHome(p: string, homedir: string): string {
   return p;
 }
 
-/** Route a path to a Codex auth.json file. */
-export function routeCodexAuthFile(file: string, homedir: string): CodexRoute {
+/**
+ * Route a path to a Codex auth.json file.
+ *
+ * `echoPath` names the path in failure reasons. Pass false for anything typed
+ * at the secret prompt: what looks like a path there may be a mistyped key,
+ * and a diagnostic must never carry it to the terminal.
+ */
+export function routeCodexAuthFile(file: string, homedir: string, echoPath = true): CodexRoute {
   const resolved = path.resolve(expandHome(file.trim(), homedir));
+  const name = echoPath ? resolved : "That path";
   let text: string;
   try {
-    if (!fs.statSync(resolved).isFile()) return { ok: false, reason: `${resolved} is not a file.` };
+    if (!fs.statSync(resolved).isFile()) return { ok: false, reason: `${name} is not a file.` };
     text = fs.readFileSync(resolved, "utf-8");
   } catch {
-    return { ok: false, reason: `Cannot read ${resolved}.` };
+    return {
+      ok: false,
+      reason: echoPath
+        ? `Cannot read ${resolved}.`
+        : "Not an OpenAI API key (sk-...), a Codex auth.json, or a readable path to one.",
+    };
   }
   const routed = routeCodexAuthJson(text);
-  return routed.ok ? routed : { ok: false, reason: `${resolved}: ${routed.reason}` };
+  return routed.ok ? routed : { ok: false, reason: `${name}: ${routed.reason}` };
+}
+
+/** Drop one pair of matching surrounding quotes, as a copied shell value often has. */
+export function stripQuotes(value: string): string {
+  const v = value.trim();
+  if (v.length >= 2 && (v[0] === "\"" || v[0] === "'") && v[v.length - 1] === v[0]) return v.slice(1, -1).trim();
+  return v;
 }
 
 /**
@@ -122,12 +141,67 @@ export function routeCodexAuthFile(file: string, homedir: string): CodexRoute {
  *   anything else    a path to an auth.json file    -> CODEX_AUTH_JSON
  */
 export function routeCodexCredential(raw: string, homedir: string): CodexRoute {
-  const value = raw.trim();
+  const value = stripQuotes(raw);
   if (!value) return { ok: false, reason: "Empty." };
   if (value.startsWith("{")) return routeCodexAuthJson(value);
   if (value.startsWith("sk-")) return routeOpenAIApiKey(value);
-  return routeCodexAuthFile(value, homedir);
+  // Never echo it: this came from the secret prompt.
+  return routeCodexAuthFile(value, homedir, false);
 }
+
+// ---------------------------------------------------------------------------
+// Does this install pass OPENAI_API_KEY to the platform?
+// ---------------------------------------------------------------------------
+//
+// Writing OPENAI_API_KEY to .env does nothing unless the compose file hands it
+// to the container that provisions codex phases. The vendored template gains
+// that line with the platform release that adds API-key support
+// (syntropic137/syntropic137#1971), so the option is gated on the template
+// itself, never on a version number: once the template sync brings the line,
+// it turns on by itself.
+
+/** One `KEY: ${KEY...}` (or `- KEY=${KEY...}`) environment entry forwarding KEY. */
+function forwards(block: string, key: string): boolean {
+  return new RegExp(`^\\s+(?:-\\s*)?${key}\\s*[:=]\\s*["']?\\$\\{${key}[:}-]`, "m").test(block);
+}
+
+/**
+ * True when the service that receives CODEX_AUTH_JSON also receives
+ * OPENAI_API_KEY in this compose file. Same service, because that is the one
+ * that stages the codex credential.
+ */
+export function composeForwardsOpenAIKey(composeText: string): boolean {
+  const blocks: string[] = [];
+  let inServices = false;
+  for (const line of composeText.split("\n")) {
+    if (/^\s*(#.*)?$/.test(line)) continue; // blank or comment, at any indent
+    if (/^\S/.test(line)) {
+      inServices = /^services:\s*$/.test(line);
+      continue;
+    }
+    if (!inServices) continue;
+    if (/^  [A-Za-z0-9_.-]+:\s*$/.test(line)) {
+      blocks.push("");
+      continue;
+    }
+    if (blocks.length > 0) blocks[blocks.length - 1] += line + "\n";
+  }
+  return blocks.some((b) => forwards(b, ENV_KEYS.CODEX_AUTH_JSON) && forwards(b, ENV_KEYS.OPENAI_API_KEY));
+}
+
+/** Read the install's compose file; false when it is missing or does not forward the key. */
+export function installForwardsOpenAIKey(installDir: string): boolean {
+  try {
+    return composeForwardsOpenAIKey(fs.readFileSync(path.join(installDir, COMPOSE_FILE), "utf-8"));
+  } catch {
+    return false;
+  }
+}
+
+/** Why an OpenAI API key cannot be used on this install yet. */
+export const API_KEY_UNSUPPORTED =
+  `This install's ${COMPOSE_FILE} does not pass ${ENV_KEYS.OPENAI_API_KEY} to the platform yet. ` +
+  "That needs the Syntropic137 release with syntropic137/syntropic137#1971 and the setup templates synced from it. Use a Codex auth.json instead.";
 
 // ---------------------------------------------------------------------------
 // This machine's Codex login
@@ -198,6 +272,11 @@ export interface CodexStepDeps {
   homedir: string;
   /** Is this binary on PATH? */
   locate: (bin: string) => boolean;
+  /**
+   * Does this install's compose file forward OPENAI_API_KEY to the platform
+   * (installForwardsOpenAIKey)? When false, an API key is refused, not stored.
+   */
+  apiKeySupported: boolean;
   confirm: (question: string, defaultYes?: boolean) => Promise<boolean>;
   promptSecret: (question: string) => Promise<string>;
   info: (msg: string) => void;
@@ -253,15 +332,16 @@ export async function codexCredentialStep(opts: CodexStepOptions, deps: CodexSte
 
   const enable = (cred: CodexCredential): CodexStepResult => {
     deps.success(`Codex enabled: ${codexKindLabel(cred.kind)}, stored as ${cred.envKey}.`);
-    if (cred.kind === "api-key") {
-      info(`${ENV_KEYS.OPENAI_API_KEY} needs a Syntropic137 platform release with API-key support for codex (syntropic137/syntropic137#1971).`);
-    }
     return { status: "enabled", credential: cred };
   };
 
   const fromRoute = async (routed: CodexRoute, what: string): Promise<CodexStepResult> => {
     if (!routed.ok) {
       warn(`${what}: ${routed.reason} Skipping Codex.`);
+      return skipped();
+    }
+    if (routed.kind === "api-key" && !deps.apiKeySupported) {
+      warn(`${API_KEY_UNSUPPORTED} Skipping Codex.`);
       return skipped();
     }
     if (!(await consentToReuse(routed))) return skipped();
@@ -298,13 +378,17 @@ export async function codexCredentialStep(opts: CodexStepOptions, deps: CodexSte
 
   // ── No terminal: never ask, never guess ──────────────────────────────
   if (!deps.interactive) {
-    info("Skipped (non-interactive). Pass --codex-auth-file <path> or --openai-api-key-env <VAR> to enable Codex phases.");
+    info(deps.apiKeySupported
+      ? "Skipped (non-interactive). Pass --codex-auth-file <path> or --openai-api-key-env <VAR> to enable Codex phases."
+      : "Skipped (non-interactive). Pass --codex-auth-file <path> to enable Codex phases.");
     return skipped();
   }
 
   // ── Interactive ──────────────────────────────────────────────────────
   if (opts.askToEnable) {
-    info("Codex phases (agent.provider: codex) need a Codex login or an OpenAI API key.");
+    info(deps.apiKeySupported
+      ? "Codex phases (agent.provider: codex) need a Codex login or an OpenAI API key."
+      : "Codex phases (agent.provider: codex) need a Codex login (auth.json).");
     const enableIt = await deps.confirm("Enable Codex phases?", deps.locate("codex"));
     if (!enableIt) {
       info("Skipped.");
@@ -314,8 +398,13 @@ export async function codexCredentialStep(opts: CodexStepOptions, deps: CodexSte
 
   const local = localAuth();
   if (local?.mode === "apikey") {
-    // No refresh token, so nothing to collide on: offer it plainly.
-    if (await deps.confirm(`Use the OpenAI API key from ${local.path}?`, true)) return enable(local.apiKey);
+    if (deps.apiKeySupported) {
+      // No refresh token, so nothing to collide on: offer it plainly.
+      if (await deps.confirm(`Use the OpenAI API key from ${local.path}?`, true)) return enable(local.apiKey);
+    } else {
+      // Never turn a working login into a config this install cannot use.
+      info(`${local.path} is an API-key login. ${API_KEY_UNSUPPORTED}`);
+    }
   } else if (local?.mode === "plan") {
     const w = sharedRefreshTokenWarning(local.path);
     warn(w.warning);
@@ -323,7 +412,9 @@ export async function codexCredentialStep(opts: CodexStepOptions, deps: CodexSte
     if (await deps.confirm(`Use ${local.path} anyway?`, false)) return enable(local.credential);
   }
 
-  info("Paste an OpenAI API key (sk-...), or the path to a Codex auth.json.");
+  info(deps.apiKeySupported
+    ? "Paste an OpenAI API key (sk-...), or the path to a Codex auth.json."
+    : "Paste the path to a Codex auth.json (OpenAI API keys need a newer platform: syntropic137/syntropic137#1971).");
   info("Dedicated login: `CODEX_HOME=$(mktemp -d) codex login`, then give the auth.json it writes.");
   const raw = (await deps.promptSecret("Codex credential")).trim();
   if (!raw) {
@@ -333,6 +424,13 @@ export async function codexCredentialStep(opts: CodexStepOptions, deps: CodexSte
   // The pasted login may still be this machine's own (pasted by path or by
   // content after declining above): the same warning and consent apply.
   return fromRoute(routeCodexCredential(raw, deps.homedir), "Codex credential");
+}
+
+/** The Codex outcome as one plain line (summary, and the --skip-docker ending). */
+export function codexOutcomeText(outcome: { enabled: true; kind: CodexCredentialKind } | { enabled: false }): string {
+  return outcome.enabled
+    ? `Codex enabled (${codexKindLabel(outcome.kind)}).`
+    : `Codex skipped. Add it later: ${CMD.codex}`;
 }
 
 /**

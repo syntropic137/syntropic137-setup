@@ -29,6 +29,15 @@ function writeTemplate(content: string): void {
 }
 
 describe("writeEnvFile", () => {
+  it("leaves .env 0600 even when it already existed with a looser mode", () => {
+    writeTemplate("APP_ENVIRONMENT=\n");
+    const envPath = path.join(tmpDir, ".env");
+    fs.writeFileSync(envPath, "OLD=1\n", { mode: 0o644 });
+    fs.chmodSync(envPath, 0o644);
+    writeEnvFile(tmpDir, { APP_ENVIRONMENT: "selfhost", SYN_VERSION: "x", OPENAI_API_KEY: "sk-proj-INVENTED-0000000000000000" }, templateDir);
+    expect(fs.statSync(envPath).mode & 0o777).toBe(0o600);
+  });
+
   it("substitutes values in template", () => {
     writeTemplate("APP_ENVIRONMENT=\nSYN_VERSION=latest\n");
     writeEnvFile(tmpDir, { APP_ENVIRONMENT: "selfhost", SYN_VERSION: "v0.18.0" }, templateDir);

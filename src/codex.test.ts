@@ -4,8 +4,11 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+  API_KEY_UNSUPPORTED,
   applyCodexCredential,
   codexCredentialStep,
+  composeForwardsOpenAIKey,
+  installForwardsOpenAIKey,
   localCodexAuthPath,
   readLocalCodexAuth,
   routeCodexAuthJson,
@@ -14,7 +17,8 @@ import {
   type CodexStepDeps,
   type CodexStepOptions,
 } from "./codex.js";
-import { ENV_KEYS } from "./constants.js";
+import { COMPOSE_FILE, ENV_KEYS } from "./constants.js";
+import { TEMPLATES_DIR } from "./templates.js";
 
 // Every value here is invented. None is a real credential.
 const API_KEY = "sk-proj-INVENTED-test-key-0000000000000000";
@@ -110,14 +114,113 @@ describe("routeCodexCredential: routes by shape", () => {
     expect(r.ok).toBe(false);
   });
 
-  it("refuses a path that does not exist, without echoing file contents", () => {
+  it("refuses a pasted path that does not exist, without echoing it", () => {
     const r = routeCodexCredential("/no/such/auth.json", home);
     expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.reason).toContain("/no/such/auth.json");
+    if (!r.ok) expect(r.reason).not.toContain("/no/such");
   });
 
   it("refuses an empty value", () => {
     expect(routeCodexCredential("   ", home).ok).toBe(false);
+  });
+});
+
+describe("secret-prompt input never reaches a diagnostic", () => {
+  it("strips surrounding quotes from a pasted key before routing", () => {
+    for (const quoted of [`"${API_KEY}"`, `'${API_KEY}'`, ` "${API_KEY}" `]) {
+      expect(routeCodexCredential(quoted, home)).toMatchObject({ ok: true, envKey: ENV_KEYS.OPENAI_API_KEY, value: API_KEY });
+    }
+  });
+
+  it("an unrecognized paste fails without naming it, path-shaped or not", () => {
+    for (const raw of ["INVENTEDsecretVALUE0000000000", `"${API_KEY}`, `${API_KEY}"`, "/tmp/INVENTEDsecretVALUE/auth.json", `"sk-proj INVENTED with spaces"`]) {
+      const r = routeCodexCredential(raw, home);
+      expect(r.ok).toBe(false);
+      if (!r.ok) {
+        expect(r.reason).not.toContain("INVENTED");
+        expect(r.reason).not.toContain(API_KEY);
+      }
+    }
+  });
+
+  it("the step's warning for a bad paste carries no part of it", async () => {
+    for (const pasted of [`"${API_KEY}`, "INVENTEDsecretVALUE0000000000"]) {
+      const h = harness({ answers: [true], pasted });
+      expect((await codexCredentialStep(initOpts(), h.deps)).status).toBe("skipped");
+      expect(h.out.some((l) => l.startsWith("warn:"))).toBe(true);
+      expectNoSecretPrinted(h.out);
+      expect(h.out.join("\n")).not.toContain("INVENTEDsecretVALUE");
+    }
+  });
+});
+
+describe("OPENAI_API_KEY is gated on the compose template (the container config)", () => {
+  const vendored = () => fs.readFileSync(path.join(TEMPLATES_DIR, COMPOSE_FILE), "utf-8");
+  const withKey = (text: string) =>
+    text.replace(/^(\s+)CODEX_AUTH_JSON: \$\{CODEX_AUTH_JSON:-\}$/m, "$&\n$1OPENAI_API_KEY: ${OPENAI_API_KEY:-}");
+
+  it("the vendored template forwards CODEX_AUTH_JSON but not yet OPENAI_API_KEY", () => {
+    expect(vendored()).toMatch(/CODEX_AUTH_JSON: \$\{CODEX_AUTH_JSON:-\}/);
+    expect(composeForwardsOpenAIKey(vendored())).toBe(false);
+  });
+
+  it("turns on once the template forwards it beside CODEX_AUTH_JSON", () => {
+    const synced = withKey(vendored());
+    expect(synced).not.toBe(vendored());
+    expect(composeForwardsOpenAIKey(synced)).toBe(true);
+  });
+
+  it("does not count OPENAI_API_KEY forwarded to a different service", () => {
+    const text = [
+      "services:",
+      "  api:",
+      "    environment:",
+      "      CODEX_AUTH_JSON: ${CODEX_AUTH_JSON:-}",
+      "# a comment at column 0 does not end services",
+      "  other:",
+      "    environment:",
+      "      OPENAI_API_KEY: ${OPENAI_API_KEY:-}",
+    ].join("\n");
+    expect(composeForwardsOpenAIKey(text)).toBe(false);
+    expect(composeForwardsOpenAIKey(text.replace("  other:\n", ""))).toBe(true);
+  });
+
+  it("reads the install's compose file; missing means unsupported", () => {
+    expect(installForwardsOpenAIKey(tmp)).toBe(false);
+    fs.writeFileSync(path.join(tmp, COMPOSE_FILE), withKey(vendored()));
+    expect(installForwardsOpenAIKey(tmp)).toBe(true);
+  });
+
+  it("gated off: --openai-api-key-env is refused with the reason, not stored", async () => {
+    const h = harness({ interactive: false, apiKeySupported: false, env: { K: API_KEY } });
+    expect((await codexCredentialStep(initOpts({ apiKeyEnv: "K" }), h.deps)).status).toBe("skipped");
+    expect(h.out.some((l) => l.startsWith("warn:") && l.includes(API_KEY_UNSUPPORTED))).toBe(true);
+    expect(h.out.some((l) => l.includes("#1971"))).toBe(true);
+    expectNoSecretPrinted(h.out);
+  });
+
+  it("gated off: a pasted key is refused", async () => {
+    const h = harness({ answers: [true], pasted: API_KEY, apiKeySupported: false });
+    expect((await codexCredentialStep(initOpts(), h.deps)).status).toBe("skipped");
+    expect(h.out.some((l) => l.includes(API_KEY_UNSUPPORTED))).toBe(true);
+  });
+
+  it("gated off: an API-key local login is not offered, and not converted", async () => {
+    writeAuth(path.join(codexHome, "auth.json"), apikeyAuth());
+    const h = harness({ answers: [true], pasted: "", apiKeySupported: false });
+    expect((await codexCredentialStep(initOpts(), h.deps)).status).toBe("skipped");
+    expect(h.confirm.mock.calls.some((c) => String(c[0]).includes("OpenAI API key"))).toBe(false);
+    expect(h.out.some((l) => l.includes("is an API-key login") && l.includes("#1971"))).toBe(true);
+    expectNoSecretPrinted(h.out);
+  });
+
+  it("gated off: an auth.json still works, and the non-interactive hint drops the key flag", async () => {
+    const file = writeAuth(path.join(tmp, "dedicated", "auth.json"), planAuth("rt_INVENTED_gated"));
+    let h = harness({ interactive: false, apiKeySupported: false });
+    expect((await codexCredentialStep(initOpts({ authFile: file }), h.deps)).status).toBe("enabled");
+    h = harness({ interactive: false, apiKeySupported: false });
+    await codexCredentialStep(initOpts(), h.deps);
+    expect(h.out.some((l) => l.includes("--openai-api-key-env"))).toBe(false);
   });
 });
 
@@ -186,6 +289,7 @@ function harness(over: Partial<CodexStepDeps> & { answers?: boolean[]; pasted?: 
     env: over.env ?? {},
     homedir: home,
     locate: (bin) => bin === "codex" && (over.onPathCodex ?? false),
+    apiKeySupported: over.apiKeySupported ?? true,
     confirm,
     promptSecret,
     info: (m) => out.push(`info: ${m}`),
@@ -220,7 +324,6 @@ describe("codexCredentialStep: flags and environment (agents, --yes)", () => {
     const r = await codexCredentialStep(initOpts({ apiKeyEnv: "MY_OPENAI_KEY" }), h.deps);
     expect(r).toMatchObject({ status: "enabled", credential: { envKey: ENV_KEYS.OPENAI_API_KEY, value: API_KEY } });
     expect(h.confirm).not.toHaveBeenCalled();
-    expect(h.out.some((l) => l.includes("#1971"))).toBe(true);
     expectNoSecretPrinted(h.out);
   });
 

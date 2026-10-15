@@ -17,7 +17,7 @@ The `init` command walks you through a 13-step interactive setup:
 3. **Copy templates:** writes the Docker Compose file, entrypoint script, env template, and database init SQL
 4. **Generate secrets:** creates cryptographically random passwords for Postgres, Redis, and MinIO (files 0644 inside a 0700 `secrets/` directory, so the containers can read them and no other host user can)
 5. **Configure LLM provider:** prompts for your Anthropic API key (or picks up `ANTHROPIC_API_KEY` from your environment)
-6. **Configure Codex (optional):** asks "Enable Codex phases?" and stores a Codex `auth.json` as `CODEX_AUTH_JSON` or an OpenAI API key as `OPENAI_API_KEY`, so workflows with `agent.provider: codex` can run (see [Codex credential](#codex-credential))
+6. **Configure Codex (optional):** asks "Enable Codex phases?" and stores a Codex `auth.json` as `CODEX_AUTH_JSON` or, once the platform supports it, an OpenAI API key as `OPENAI_API_KEY`, so workflows with `agent.provider: codex` can run (see [Codex credential](#codex-credential))
 7. **GitHub App setup:** runs the [GitHub App Manifest flow](https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest) to create a GitHub App with the right permissions in one click (optional, skippable)
 8. **Agent skills:** installs the [Syntropic137 agent skills](https://github.com/syntropic137/syntropic137-skills) globally for Claude Code and Codex, whichever you have (optional, skippable)
 9. **Syntropic137 CLI:** installs the `syn` CLI for managing workflows and executions (optional, skippable)
@@ -98,14 +98,14 @@ Codex phases (`agent.provider: codex`) need a credential of their own. `init` of
 | A Codex `auth.json` | `CODEX_AUTH_JSON` (the JSON on one line) | A Codex or ChatGPT plan login |
 | An OpenAI API key (`sk-...`) | `OPENAI_API_KEY` | Pay as you go, no Codex plan needed |
 
-**The OpenAI API key needs a newer platform:** the platform reads `OPENAI_API_KEY` for codex phases only from the release that includes [syntropic137/syntropic137#1971](https://github.com/syntropic137/syntropic137/issues/1971), and this package's Compose template passes it to the API container only once the templates are synced from that release. Until then, use an `auth.json`.
+**The OpenAI API key needs a newer platform:** the platform reads `OPENAI_API_KEY` for codex phases only from the release that includes [syntropic137/syntropic137#1971](https://github.com/syntropic137/syntropic137/issues/1971). Setup therefore offers and accepts an API key only when the install's `docker-compose.syntropic137.yaml` passes `OPENAI_API_KEY` to the same service that receives `CODEX_AUTH_JSON`. The template vendored today does not, so an API key is refused with that reason and nothing is stored; use an `auth.json`. The option turns on by itself once the templates are synced from that release.
 
-At the prompt, paste an API key or the path to an `auth.json` (a one-line JSON object also works). Setup checks that the JSON parses and has an `auth_mode` field, refuses an Anthropic key, and never prints the value. Like the Anthropic credential, it goes into `.env` (0600). The `codex` command removes the other key when it writes one, so the two never disagree.
+At the prompt, paste the path to an `auth.json` (a one-line JSON object also works) or, when supported, an API key. Surrounding quotes are dropped. Setup checks that the JSON parses and has an `auth_mode` field, refuses an Anthropic key, and never prints what you pasted, even when it is not recognised. Like the Anthropic credential, it goes into `.env`, which every write leaves at 0600. The `codex` command removes the other key when it writes one, so the two never disagree.
 
 **This machine's `~/.codex/auth.json`** (or `$CODEX_HOME/auth.json`): when it exists, `init` offers it.
 
 - A plan login is offered only after a warning, and the question defaults to no: this machine and the platform would share one single-use refresh token, so whichever refreshes second is logged out with `refresh_token_reused` ([syntropic137/syntropic137#893](https://github.com/syntropic137/syntropic137/issues/893)). Prefer a dedicated login, `CODEX_HOME=$(mktemp -d) codex login`, and give setup the `auth.json` it writes, or an API key. The same warning and question apply when the same login arrives another way (pasted, `--codex-auth-file`, or `CODEX_AUTH_JSON`).
-- An API-key login (`{"auth_mode":"apikey","OPENAI_API_KEY":...}`) has no refresh token, so it is offered as an API key, with no warning.
+- An API-key login (`{"auth_mode":"apikey","OPENAI_API_KEY":...}`) has no refresh token, so it is offered as an API key, with no warning, when the install supports API keys. Otherwise setup says so and does not offer it.
 
 **Without a terminal (agents):**
 
@@ -114,9 +114,9 @@ npx @syntropic137/setup init --codex-auth-file ~/codex-dedicated/auth.json
 OPENAI_KEY_FOR_SYN=... npx @syntropic137/setup init --openai-api-key-env OPENAI_KEY_FOR_SYN
 ```
 
-`--openai-api-key-env` takes the name of a variable, so the key never appears in the process arguments. An `OPENAI_API_KEY` already in your shell is not picked up on its own. Without a terminal, this machine's own plan login (passed with `--codex-auth-file` or as `CODEX_AUTH_JSON`) prints the warning and is used only with `--yes`. Pass at most one of `--codex-auth-file`, `--openai-api-key-env` and `--skip-codex`.
+`--openai-api-key-env` takes the name of a variable, so the key never appears in the process arguments. An `OPENAI_API_KEY` already in your shell is not picked up on its own. Without a terminal, this machine's own plan login (passed with `--codex-auth-file` or as `CODEX_AUTH_JSON`) prints the warning and is used only with `--yes`. Pass at most one of `--codex-auth-file`, `--openai-api-key-env` and `--skip-codex`. The `codex` command refuses `--skip-codex`.
 
-The final summary shows `Codex enabled` with the credential type, or `skipped` with the command to add it later.
+`init` ends by showing `Codex enabled` with the credential type, or `Codex skipped` with the command to add it later: in the final summary, or as the last line with `--skip-docker`.
 
 ## How the GitHub App Manifest flow works
 

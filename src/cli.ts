@@ -58,6 +58,8 @@ import { SkillsManager, defaultRunner, onPath, skillsRemoveArgs } from "./skills
 import {
   applyCodexCredential,
   codexCredentialStep,
+  codexOutcomeText,
+  installForwardsOpenAIKey,
   type CodexStepDeps,
 } from "./codex.js";
 import type { CodexSummary } from "./ui.js";
@@ -272,7 +274,7 @@ export class InitFlow {
         yes: this.opts.yes,
         askToEnable: true,
       },
-      codexStepDeps(),
+      codexStepDeps(this.installDir),
     );
     if (codex.status === "enabled") {
       envValues[codex.credential.envKey] = codex.credential.value;
@@ -347,6 +349,7 @@ export class InitFlow {
     if (this.opts.skipDocker) {
       console.log();
       success("Templates written to " + this.installDir);
+      info(codexOutcomeText(codexSummary));
       info(`Run \`cd ${this.installDir} && docker compose -f ${COMPOSE_FILE} up -d\` to start.`);
       return;
     }
@@ -547,10 +550,12 @@ function isInteractive(): boolean {
   return Boolean(process.stdin.isTTY && process.stdout.isTTY);
 }
 
-/** Real-world dependencies of the Codex credential step. */
-function codexStepDeps(): CodexStepDeps {
+/** Real-world dependencies of the Codex credential step, for this install. */
+function codexStepDeps(installDir: string): CodexStepDeps {
   return {
     interactive: isInteractive(),
+    // Read from the install's own compose file: that is what the stack runs.
+    apiKeySupported: installForwardsOpenAIKey(installDir),
     env: process.env,
     homedir: os.homedir(),
     locate: (bin) => onPath(bin),
@@ -735,7 +740,7 @@ export class CLI {
         yes: this.opts.yes,
         askToEnable: false,
       },
-      codexStepDeps(),
+      codexStepDeps(installDir),
     );
     if (result.status !== "enabled") {
       info("Nothing changed.");
@@ -1412,6 +1417,10 @@ export class CLI {
       }
     }
 
+    if (command === "codex" && opts.skipCodex) {
+      fail("--skip-codex does not apply to the codex command, which only adds or replaces the Codex credential. Nothing changed.");
+      process.exit(1);
+    }
     const codexSources = [opts.skipCodex && "--skip-codex", opts.codexAuthFile !== undefined && "--codex-auth-file", opts.openaiApiKeyEnv !== undefined && "--openai-api-key-env"].filter(Boolean);
     if (codexSources.length > 1) {
       fail(`Pass only one of ${codexSources.join(", ")}: setup stores one Codex credential.`);
@@ -1465,7 +1474,8 @@ ${usageLines}
     --openai-api-key-env <VAR>
                           Store the OpenAI API key held in env var VAR as
                           OPENAI_API_KEY (init, codex). Takes the variable
-                          name, never the key itself
+                          name, never the key itself. Only when the install's
+                          compose file forwards OPENAI_API_KEY (syntropic137#1971)
     --skip-codex          Skip the Codex credential step
     -y, --yes             Answer yes instead of asking (installing the agent skills
                           and the syn CLI in a non-interactive init, removing the
