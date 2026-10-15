@@ -52,7 +52,9 @@ export class ConfigManager {
       const value = rawValue.replace(/[\r\n]/g, "");
       const regex = new RegExp(`^(${key})=.*$`, "m");
       if (regex.test(template)) {
-        template = template.replace(regex, `$1=${value}`);
+        // A function replacement: a string one would expand `$&`, `$1` and
+        // `$$` inside the value, silently rewriting passwords that contain `$`.
+        template = template.replace(regex, () => `${key}=${value}`);
       } else {
         template += `\n${key}=${value}\n`;
       }

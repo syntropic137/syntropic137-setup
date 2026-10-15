@@ -38,6 +38,14 @@ describe("writeEnvFile", () => {
     expect(fs.statSync(envPath).mode & 0o777).toBe(0o600);
   });
 
+  it("keeps `$` sequences in values literal", () => {
+    writeTemplate("SYN_API_PASSWORD=\nAPP_ENVIRONMENT=\n");
+    const password = "invented$&pa$1ss$$word$`x$'y";
+    writeEnvFile(tmpDir, { SYN_API_PASSWORD: password, APP_ENVIRONMENT: "selfhost", SYN_VERSION: "x" }, templateDir);
+    const content = fs.readFileSync(path.join(tmpDir, ".env"), "utf-8");
+    expect(content).toContain(`SYN_API_PASSWORD=${password}\n`);
+  });
+
   it("substitutes values in template", () => {
     writeTemplate("APP_ENVIRONMENT=\nSYN_VERSION=latest\n");
     writeEnvFile(tmpDir, { APP_ENVIRONMENT: "selfhost", SYN_VERSION: "v0.18.0" }, templateDir);
