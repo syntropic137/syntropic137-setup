@@ -1,4 +1,4 @@
-# Pinned to release v1.0.0 — image digests verified by cosign
+# Pinned to release v1.0.2 — image digests verified by cosign
 # =============================================================================
 # Syntropic137 — Self-Host Docker Compose (Published)
 # =============================================================================
@@ -177,7 +177,7 @@ services:
       options:
         max-size: 10m
         max-file: "3"
-    image: ghcr.io/syntropic137/syn-collector@sha256:a759fb83eecb7450a7a98cd3ac6c390cd2013c39c55e5f828681763616221f0e
+    image: ghcr.io/syntropic137/syn-collector@sha256:d57cf5ac4cc768c4ee0f27d556dc10bd7035658c59d03b7b91670ae1878e982d
   docker-socket-proxy:
     image: tecnativa/docker-socket-proxy:0.3.0
     entrypoint:
@@ -305,6 +305,12 @@ services:
       SYN_WORKSPACE_DOCKER_NETWORK: null
       SYN_EXECUTION_MAX_CONCURRENT: null
       SYN_EXECUTION_INTERRUPT_BUDGET_S: null
+      SYN_EXECUTION_RUN_QUEUE_ENABLED: null
+      SYN_EXECUTOR_POOL_ID: null
+      SYN_EXECUTOR_POOL_PRIORITY: null
+      SYN_EXECUTOR_POOL_REGION: null
+      SYN_EXECUTOR_POOL_CAPABILITIES: null
+      SYN_EXECUTOR_POOL_OVERFLOW_DELAY_S: null
       SYN_IMAGE_VERIFY_ENABLED: null
       SYN_IMAGE_VERIFY_CERTIFICATE_IDENTITY_REGEXP: null
       SYN_IMAGE_VERIFY_CERTIFICATE_OIDC_ISSUER: null
@@ -312,12 +318,6 @@ services:
       SYN_IMAGE_VERIFY_ALLOW_LOCAL_IMAGES: null
       SYN_IMAGE_VERIFY_COSIGN_PATH: null
       SYN_IMAGE_VERIFY_TIMEOUT_SECONDS: null
-      SYN_SECURITY_ALLOW_NETWORK: null
-      SYN_SECURITY_ALLOWED_HOSTS: null
-      SYN_SECURITY_READ_ONLY_ROOT: null
-      SYN_SECURITY_MAX_WORKSPACE_SIZE: null
-      SYN_SECURITY_MAX_PIDS: null
-      SYN_SECURITY_MAX_EXECUTION_TIME: null
       SYN_GIT_USER_NAME: null
       SYN_GIT_USER_EMAIL: null
       SYN_GIT_TOKEN: null
@@ -331,11 +331,16 @@ services:
       SYN_STORAGE_MAX_FILE_SIZE_MB: null
       SYN_STORAGE_PRESIGNED_URL_EXPIRY_SECONDS: null
       SYN_DISK_PATH: null
+      SYN_DISK_RUN_RESERVE_GIB: null
+      SYN_DISK_REFUSE_ADMISSION_BELOW_GIB: null
+      SYN_DISK_DEGRADED_BELOW_GIB: null
       SYN_DISK_DEGRADED_BELOW_PERCENT: null
       SYN_DISK_REFUSE_ADMISSION_BELOW_PERCENT: null
       SYN_DISK_RECLAIM_GRACE_HOURS: null
       SYN_DISK_RECLAIM_INTERVAL_MINUTES: null
       SYN_DISK_PAGE_WEBHOOK_URL: null
+      SYN_DEPENDENCY_SEED_DIR: null
+      SYN_DEPENDENCY_SEED_MAX_BYTES: null
       SYN_SESSION_INVENTORY_SOURCE_INSTANCE_ID: ${SYN_SESSION_INVENTORY_SOURCE_INSTANCE_ID:-}
       SYN_SESSION_INVENTORY_SWEEP_INTERVAL_SECONDS: ${SYN_SESSION_INVENTORY_SWEEP_INTERVAL_SECONDS:-30}
       SYN_SESSION_INVENTORY_SETTLEMENT_GRACE_SECONDS: ${SYN_SESSION_INVENTORY_SETTLEMENT_GRACE_SECONDS:-1800}
@@ -450,7 +455,7 @@ services:
       options:
         max-size: 10m
         max-file: "3"
-    image: ghcr.io/syntropic137/syn-api@sha256:eec1dc59d564fdebf9060da2774277ccf47d170ed3ada0d3495fce5388b9c4c8
+    image: ghcr.io/syntropic137/syn-api@sha256:e64c2b25a6748e41ee619265213023f3936bb41c1b956613721c66188694ce4c
   gateway:
     container_name: syn137-gateway
     cpu_shares: ${CONTROL_PLANE_CPU_SHARES:-4096}
@@ -501,7 +506,7 @@ services:
         max-file: "3"
     networks:
     - syn-internal
-    image: ghcr.io/syntropic137/syn-gateway@sha256:f74f11e9a72296d9cd7ffe58702122cad28cad36c9c40c5ba40774c4e981db52
+    image: ghcr.io/syntropic137/syn-gateway@sha256:246c618ff36a5a103a200a1772fbd145c00d27983946745d09c95ab3ff431b27
   cloudflared:
     image: cloudflare/cloudflared:2026.2.0
     container_name: syn137-cloudflared
@@ -644,7 +649,7 @@ services:
       options:
         max-size: 10m
         max-file: "3"
-    image: ghcr.io/syntropic137/sidecar-proxy@sha256:09e410351858b5f8cde63c12aefbf7d83e5c8134dad3352142d5b3df83ec76d8
+    image: ghcr.io/syntropic137/sidecar-proxy@sha256:8c539d881e2fd7977995bce0b0cc8ca9a1a72ac181f5a6d0cea9c0a43029cd8b
   token-injector:
     environment:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
@@ -663,7 +668,7 @@ services:
       options:
         max-size: 5m
         max-file: "3"
-    image: ghcr.io/syntropic137/token-injector@sha256:01443cb149032eabe7baf6f3fd55ee6d81363f122f7b65b4a62eb3d646914672
+    image: ghcr.io/syntropic137/token-injector@sha256:31c7d80f9e75ce51c90065364be234eeebbd981a391159278d6b74347d853f64
 secrets:
   db_password:
     file: ./secrets/db-password.secret
