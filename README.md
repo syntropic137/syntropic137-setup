@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/banner.svg" alt="Syntropic137 Setup" width="100%">
+</p>
+
 # syntropic137
 
 Zero-dependency self-host setup CLI for [Syntropic137](https://github.com/syntropic137/syntropic137). One command to go from nothing to a fully running stack.
