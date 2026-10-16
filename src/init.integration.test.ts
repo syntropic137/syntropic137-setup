@@ -110,9 +110,10 @@ import { TEMPLATES_DIR } from "./templates.js";
 
 /** The vendored compose template, as shipped. */
 const vendoredCompose = () => fs.readFileSync(path.join(TEMPLATES_DIR, "docker-compose.syntropic137.yaml"), "utf-8");
-/** The vendored template once synced from a platform that forwards OPENAI_API_KEY (#1971). */
-const composeWithOpenAIKey = () =>
-  vendoredCompose().replace(/^(\s+)CODEX_AUTH_JSON: \$\{CODEX_AUTH_JSON:-\}$/m, "$&\n$1OPENAI_API_KEY: ${OPENAI_API_KEY:-}");
+/** A compose file from a platform release that predates OPENAI_API_KEY forwarding (before v1.0.3). */
+const composeWithoutOpenAIKey = () => vendoredCompose().replace(/^\s+OPENAI_API_KEY: \$\{OPENAI_API_KEY:-\}\n/gm, "");
+/** The vendored template, synced from v1.0.3, which forwards OPENAI_API_KEY (#1971). */
+const composeWithOpenAIKey = () => vendoredCompose();
 /** Make the next init copy this compose file into the install (and leave it for the codex command). */
 function seedCompose(_dir: string, text: string): void {
   composeOverride.text = text;
@@ -546,9 +547,9 @@ describe("runInit Codex step", () => {
     expect(fs.statSync(path.join(tmpDir, ".env")).mode & 0o777).toBe(0o600);
   });
 
-  it("--openai-api-key-env with the vendored compose file (no forwarding) stores nothing", async () => {
+  it("--openai-api-key-env with a compose file that does not forward it stores nothing", async () => {
     process.env.S137_TEST_OPENAI_KEY = OPENAI_KEY;
-    seedCompose(tmpDir, vendoredCompose());
+    seedCompose(tmpDir, composeWithoutOpenAIKey());
     await runInit({ command: "init", dir: tmpDir, skipDocker: true, skipGithub: true, openaiApiKeyEnv: "S137_TEST_OPENAI_KEY" });
     const env = readEnvFile();
     expect(env[ENV_KEYS.OPENAI_API_KEY]).toBeUndefined();
