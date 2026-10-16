@@ -1,4 +1,4 @@
-# Pinned to release v1.0.2 — image digests verified by cosign
+# Pinned to release v1.0.3 — image digests verified by cosign
 # =============================================================================
 # Syntropic137 — Self-Host Docker Compose (Published)
 # =============================================================================
@@ -177,7 +177,7 @@ services:
       options:
         max-size: 10m
         max-file: "3"
-    image: ghcr.io/syntropic137/syn-collector@sha256:d57cf5ac4cc768c4ee0f27d556dc10bd7035658c59d03b7b91670ae1878e982d
+    image: ghcr.io/syntropic137/syn-collector@sha256:a62580a2ada2ddd5b9808e87b4f12f2f99fba309fed11f7b151c9ccefe691987
   docker-socket-proxy:
     image: tecnativa/docker-socket-proxy:0.3.0
     entrypoint:
@@ -274,6 +274,7 @@ services:
       REQUEST_LATENCY_SHUTDOWN_TIMEOUT_S: null
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
       CODEX_AUTH_JSON: ${CODEX_AUTH_JSON:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       SYN_DEFAULT_CLAUDE_MODEL: null
       SYN_DEFAULT_CODEX_MODEL: null
       SETUP_PHASE_TIMEOUT_SECONDS: null
@@ -455,7 +456,7 @@ services:
       options:
         max-size: 10m
         max-file: "3"
-    image: ghcr.io/syntropic137/syn-api@sha256:e64c2b25a6748e41ee619265213023f3936bb41c1b956613721c66188694ce4c
+    image: ghcr.io/syntropic137/syn-api@sha256:123c05bae01117fd7176162f7b60f9bb194f05bf0bd16a19032813a74bc1ec83
   gateway:
     container_name: syn137-gateway
     cpu_shares: ${CONTROL_PLANE_CPU_SHARES:-4096}
@@ -506,7 +507,7 @@ services:
         max-file: "3"
     networks:
     - syn-internal
-    image: ghcr.io/syntropic137/syn-gateway@sha256:246c618ff36a5a103a200a1772fbd145c00d27983946745d09c95ab3ff431b27
+    image: ghcr.io/syntropic137/syn-gateway@sha256:c841542c6a6a49bd5438a8d47a4d0f304c88e89705f882674204b425ede62e94
   cloudflared:
     image: cloudflare/cloudflared:2026.2.0
     container_name: syn137-cloudflared
@@ -649,7 +650,7 @@ services:
       options:
         max-size: 10m
         max-file: "3"
-    image: ghcr.io/syntropic137/sidecar-proxy@sha256:8c539d881e2fd7977995bce0b0cc8ca9a1a72ac181f5a6d0cea9c0a43029cd8b
+    image: ghcr.io/syntropic137/sidecar-proxy@sha256:a255c6b3c233a7edf3a913106db76ecf48c7d81a7653c98827b4bac0c75d2240
   token-injector:
     environment:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
@@ -668,7 +669,7 @@ services:
       options:
         max-size: 5m
         max-file: "3"
-    image: ghcr.io/syntropic137/token-injector@sha256:31c7d80f9e75ce51c90065364be234eeebbd981a391159278d6b74347d853f64
+    image: ghcr.io/syntropic137/token-injector@sha256:d7b01dccb0e941e7cb208fd20ad31eb79c4f428c77c1a457c0c8aa8b3b52e330
 secrets:
   db_password:
     file: ./secrets/db-password.secret
