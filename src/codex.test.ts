@@ -158,16 +158,23 @@ describe("OPENAI_API_KEY is gated on the compose template (the container config)
   const vendored = () => fs.readFileSync(path.join(TEMPLATES_DIR, COMPOSE_FILE), "utf-8");
   const withKey = (text: string) =>
     text.replace(/^(\s+)CODEX_AUTH_JSON: \$\{CODEX_AUTH_JSON:-\}$/m, "$&\n$1OPENAI_API_KEY: ${OPENAI_API_KEY:-}");
+  /** A compose file from a platform release that predates OPENAI_API_KEY forwarding (before v1.0.3). */
+  const withoutKey = (text: string) => text.replace(/^\s+OPENAI_API_KEY: \$\{OPENAI_API_KEY:-\}\n/gm, "");
 
-  it("the vendored template forwards CODEX_AUTH_JSON but not yet OPENAI_API_KEY", () => {
+  it("the vendored template (synced from v1.0.3) forwards OPENAI_API_KEY beside CODEX_AUTH_JSON", () => {
     expect(vendored()).toMatch(/CODEX_AUTH_JSON: \$\{CODEX_AUTH_JSON:-\}/);
-    expect(composeForwardsOpenAIKey(vendored())).toBe(false);
+    expect(composeForwardsOpenAIKey(vendored())).toBe(true);
+  });
+
+  it("stays off for a compose file that does not forward it", () => {
+    const old = withoutKey(vendored());
+    expect(old).not.toBe(vendored());
+    expect(composeForwardsOpenAIKey(old)).toBe(false);
   });
 
   it("turns on once the template forwards it beside CODEX_AUTH_JSON", () => {
-    const synced = withKey(vendored());
-    expect(synced).not.toBe(vendored());
-    expect(composeForwardsOpenAIKey(synced)).toBe(true);
+    const old = withoutKey(vendored());
+    expect(composeForwardsOpenAIKey(withKey(old))).toBe(true);
   });
 
   it("does not count OPENAI_API_KEY forwarded to a different service", () => {
