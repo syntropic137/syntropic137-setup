@@ -1,6 +1,6 @@
 {
   "name": "@syntropic137/setup",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "type": "module",
   "description": "Zero-dependency self-host setup CLI for Syntropic137",
   "bin": {
@@ -40,7 +40,7 @@
     "url": "git+https://github.com/syntropic137/syntropic137-setup.git"
   },
   "syntropic137": {
-    "platformVersion": "1.0.3"
+    "platformVersion": "1.0.4"
   },
   "license": "MIT",
   "devDependencies": {
